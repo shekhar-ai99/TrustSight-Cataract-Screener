@@ -17,7 +17,6 @@ def batch_run(input_dir: str, out_csv: str = "batch_results.csv"):
                 'filename': fn,
                 'prediction': data.get('cataract_prob'),
                 'confidence': data.get('confidence'),
-                'uncertainty': data.get('uncertainty'),
                 'rejected': data.get('status') != 'PREDICT'
             })
         except Exception as e:

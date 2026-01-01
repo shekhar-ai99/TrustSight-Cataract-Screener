@@ -23,12 +23,7 @@ class CataractModel(nn.Module):
         self.backbone._fc = nn.Linear(in_features, 1)
 
     def forward(self, x, mc: bool = False):
-        # Default behavior unchanged: eval mode unless mc=True
-        if mc:
-            # enable dropout layers during inference but keep overall model in eval
-            self.enable_mc_dropout()
-        else:
-            self.disable_mc_dropout()
+        # Default behavior: just run backbone. MC behavior is handled by safe_mc_forward
         out = self.backbone(x)
         return out
 
@@ -44,8 +39,48 @@ class CataractModel(nn.Module):
             if isinstance(m, nn.Dropout):
                 m.eval()
 
-    def predict_proba(self, x):
-        with torch.no_grad():
-            logits = self.forward(x, mc=False)
-            probs = torch.sigmoid(logits).squeeze().cpu().numpy()
-        return probs
+    def safe_mc_forward(self, x, n_samples: int = 15):
+        """
+        Perform MC Dropout forward passes without permanently mutating model state.
+        Temporarily set the model to train() so dropout is active, run passes under
+        torch.no_grad(), then restore all modules' training flags to their originals.
+        Returns a list of probabilities (floats) of length n_samples.
+        """
+        orig_training = {m: m.training for m in self.modules()}
+        try:
+            # Enable train mode so dropout layers are active
+            self.train()
+            probs = []
+            with torch.no_grad():
+                for _ in range(n_samples):
+                    out = self.forward(x)
+                    # handle possible tensor shapes
+                    p_tensor = torch.sigmoid(out)
+                    p = p_tensor.squeeze().cpu().numpy()
+                    # Ensure we append a scalar or 1-d array consistently
+                    if hasattr(p, "tolist"):
+                        p = p.tolist()
+                    probs.append(float(p) if isinstance(p, (float, int)) else p)
+            return probs
+        finally:
+            # Restore original training flags
+            for m, was_training in orig_training.items():
+                m.training = was_training
+
+    def predict_proba(self, x, n_mc: int = 1):
+        """
+        If n_mc == 1: deterministic prediction with dropout disabled.
+        If n_mc > 1: perform MC Dropout sampling using safe_mc_forward.
+        """
+        if n_mc <= 1:
+            with torch.no_grad():
+                logits = self.forward(x)
+                probs = torch.sigmoid(logits).squeeze().cpu().numpy()
+            # Return a list for consistency when downstream expects iterable
+            if isinstance(probs, (float, int)):
+                return [float(probs)]
+            return probs.tolist()
+        else:
+            probs = self.safe_mc_forward(x, n_samples=n_mc)
+            # safe_mc_forward already returns list of floats
+            return probs

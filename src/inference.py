@@ -1,40 +1,35 @@
 import json
 import argparse
 import os
-import math
 from .utils import set_seed
 from .model import CataractModel
 from .preprocess import load_image_to_tensor
 from .iqa import check_image_quality
 from .gradcam import generate_gradcam
+from .schema import InferenceOutput
 import torch
+import numpy as np
+from pydantic import ValidationError
 
 
 set_seed()
 
 
-def _compute_confidence_from_probs(probs):
+def _compute_confidence_from_probs(probs: np.ndarray):
     # probs: np.array of shape (N,)
     mean = float(probs.mean())
     var = float(probs.var(ddof=0))
-    # normalize variance by max possible Bernoulli variance mean*(1-mean)
-    denom = mean * (1.0 - mean)
-    if denom <= 0:
-        normalized_var = 0.0
-    else:
-        normalized_var = var / (denom + 1e-12)
-    normalized_var = max(0.0, min(1.0, normalized_var))
-    confidence = 1.0 - normalized_var
-    return mean, var, float(normalized_var), float(confidence)
+    # Normalize confidence using max Bernoulli variance 0.25
+    confidence = max(0.0, 1.0 - (var / 0.25))
+    return mean, var, confidence
 
 
-def infer(image_path: str, explain: bool = False, n_mc: int = 20, weights_path: str | None = None):
-    # IQA gate
-    if not check_image_quality(image_path):
-        return json.dumps({
-            "status": "REJECT",
-            "reason": "LOW_IMAGE_QUALITY"
-        })
+def infer(image_path: str, explain: bool = False, n_mc: int = 15, weights_path: str | None = None):
+    # IQA gate (runs BEFORE inference)
+    status, reason = check_image_quality(image_path)
+    if status == "REJECT":
+        out = InferenceOutput(status="REJECT", cataract_prob=None, confidence=None, action="REJECT", reason=reason)
+        return json.dumps(out.model_dump())
 
     # Load model (CPU-only)
     model = CataractModel(weights_path=weights_path)
@@ -43,46 +38,55 @@ def infer(image_path: str, explain: bool = False, n_mc: int = 20, weights_path: 
     # Preprocess
     img_tensor = load_image_to_tensor(image_path)
 
-    # MC Dropout sampling
-    probs = []
-    model.eval()
-    # Enable dropout layers manually when doing MC
-    for i in range(n_mc):
-        model.enable_mc_dropout()
-        with torch.no_grad():
-            out = model(img_tensor, mc=True)
-            p = torch.sigmoid(out).squeeze().cpu().item()
-            probs.append(p)
-
-    import numpy as np
+    # MC Dropout sampling (use model.predict_proba which uses safe_mc_forward)
+    probs = model.predict_proba(img_tensor, n_mc=n_mc)
     probs = np.array(probs, dtype=np.float64)
-    mean_prob, var, norm_var, confidence = _compute_confidence_from_probs(probs)
 
-    result = {
-        "status": "PREDICT",
-        "cataract_prob": round(float(mean_prob), 4),
-        "confidence": round(float(confidence), 4),
-        "uncertainty": round(float(norm_var), 4),
-        "action": "PREDICT"
-    }
+    mean_prob, var, confidence = _compute_confidence_from_probs(probs)
 
-    # Explainability
+    # Action policy
+    if confidence >= 0.8:
+        action = "PREDICT"
+    elif 0.5 <= confidence < 0.8:
+        action = "REFER_TO_SPECIALIST"
+    else:
+        action = "REJECT"
+
+    status_out = "PREDICT" if action != "REJECT" else "REJECT"
+
+    reason_out = None
+    if action == "REJECT":
+        reason_out = {"code": "LOW_CONFIDENCE", "confidence": float(confidence), "variance": float(var)}
+
+    result = InferenceOutput(
+        status=status_out,
+        cataract_prob=(round(float(mean_prob), 4) if action != "REJECT" else None),
+        confidence=(round(float(confidence), 4) if action != "REJECT" else None),
+        action=action,
+        reason=reason_out,
+    )
+
+    # Explainability: generate Grad-CAM deterministically
     if explain:
-        # For Grad-CAM generate using deterministic forward (dropout disabled)
-        model.disable_mc_dropout()
-        # generate_gradcam expects tensor on cpu
-        gradcam_path = os.path.join("outputs", "gradcam_image.jpg")
-        os.makedirs("outputs", exist_ok=True)
         try:
+            model.eval()
+            os.makedirs("outputs", exist_ok=True)
+            gradcam_path = os.path.join("outputs", "gradcam_image.jpg")
             generate_gradcam(model, img_tensor, target_class=1, out_path=gradcam_path)
+            with open(os.path.join("outputs", "result.json"), "w") as f:
+                json.dump(result.model_dump(), f)
         except Exception:
-            # Non-fatal: continue and return prediction
             pass
-        # Save result json
-        with open(os.path.join("outputs", "result.json"), "w") as f:
-            json.dump(result, f)
 
-    return json.dumps(result)
+    # Validate and return JSON
+    try:
+        # model_dump returns a dict that is JSON serializable
+        validated = result.model_dump()
+        return json.dumps(validated)
+    except ValidationError as e:
+        # In the unlikely event validation fails, return explicit rejection
+        err = InferenceOutput(status="REJECT", cataract_prob=None, confidence=None, action="REJECT", reason={"code": "SCHEMA_VALIDATION_ERROR", "detail": str(e)})
+        return json.dumps(err.model_dump())
 
 
 def _cli():
@@ -90,8 +94,9 @@ def _cli():
     parser.add_argument("image")
     parser.add_argument("--explain", action="store_true")
     parser.add_argument("--weights", default=None)
+    parser.add_argument("--n-mc", type=int, default=15)
     args = parser.parse_args()
-    out = infer(args.image, explain=args.explain, weights_path=args.weights)
+    out = infer(args.image, explain=args.explain, n_mc=args.n_mc, weights_path=args.weights)
     print(out)
 
 

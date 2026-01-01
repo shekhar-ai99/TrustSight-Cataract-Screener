@@ -14,6 +14,9 @@ from pydantic import ValidationError
 
 set_seed()
 
+# OOD rejection threshold (Phase 3 hardening)
+OOD_CONF_THRESHOLD = 0.60
+
 
 def _compute_confidence_from_probs(probs: np.ndarray):
     # probs: np.array of shape (N,)
@@ -43,6 +46,14 @@ def infer(image_path: str, explain: bool = False, n_mc: int = 15, weights_path: 
     probs = np.array(probs, dtype=np.float64)
 
     mean_prob, var, confidence = _compute_confidence_from_probs(probs)
+
+    # OOD confidence-based rejection: if the maximum sampled probability
+    # across MC runs is below a conservative threshold, treat as OOD and reject.
+    max_prob = float(np.max(probs)) if probs.size > 0 else 0.0
+    if max_prob < OOD_CONF_THRESHOLD:
+        reason_out = {"code": "low_confidence_ood", "max_prob": float(round(max_prob, 4))}
+        err = InferenceOutput(status="REJECT", cataract_prob=None, confidence=float(round(confidence, 4)), action="REJECT", reason=reason_out)
+        return json.dumps(err.model_dump())
 
     # Action policy
     if confidence >= 0.8:

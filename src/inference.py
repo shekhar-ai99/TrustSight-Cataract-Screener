@@ -6,7 +6,10 @@ from .model import CataractModel
 from .preprocess import load_image_to_tensor
 from .iqa import check_image_quality
 from .gradcam import generate_gradcam
-from .schema import InferenceOutput
+from schema.output_schema import InferenceOutputSchema
+from .inference.mc_dropout import mc_inference
+from .inference.decision import decide_action
+from .utils import set_seed
 import torch
 import numpy as np
 from pydantic import ValidationError
@@ -14,90 +17,70 @@ from pydantic import ValidationError
 
 set_seed()
 
-# OOD rejection threshold (Phase 3 hardening)
-OOD_CONF_THRESHOLD = 0.60
 
+def infer(image_path: str, explain: bool = False, n_mc: int = 15, weights_path: str | None = None, seed: int = 42):
+    """Main inference pipeline for Phase 2.
 
-def _compute_confidence_from_probs(probs: np.ndarray):
-    # probs: np.array of shape (N,)
-    mean = float(probs.mean())
-    var = float(probs.var(ddof=0))
-    # Normalize confidence using max Bernoulli variance 0.25
-    confidence = max(0.0, 1.0 - (var / 0.25))
-    return mean, var, confidence
+    - Runs IQA gate first and returns the exact JSON on IQA failure.
+    - Runs MC Dropout for `n_mc` stochastic passes.
+    - Computes mean, variance, confidence and decides action.
+    - Validates final output against the strict Pydantic schema.
+    """
+    # Determinism
+    set_seed(seed)
 
-
-def infer(image_path: str, explain: bool = False, n_mc: int = 15, weights_path: str | None = None):
     # IQA gate (runs BEFORE inference)
     status, reason = check_image_quality(image_path)
     if status == "REJECT":
-        out = InferenceOutput(status="REJECT", cataract_prob=None, confidence=None, action="REJECT", reason=reason)
-        return json.dumps(out.model_dump())
+        # Per Phase 2 spec, return immediately this exact structure
+        return json.dumps({"status": "REJECT", "reason": "LOW_IMAGE_QUALITY"})
 
-    # Load model (CPU-only)
+    # Load model (CPU-only as required)
     model = CataractModel(weights_path=weights_path)
     model.to(torch.device("cpu"))
+    model.eval()
 
     # Preprocess
     img_tensor = load_image_to_tensor(image_path)
 
-    # MC Dropout sampling (use model.predict_proba which uses safe_mc_forward)
-    probs = model.predict_proba(img_tensor, n_mc=n_mc)
+    # MC Dropout sampling and statistics
+    probs = mc_inference(model, img_tensor, n_mc=n_mc, seed=seed)
     probs = np.array(probs, dtype=np.float64)
 
-    mean_prob, var, confidence = _compute_confidence_from_probs(probs)
+    mean_prob = float(np.mean(probs)) if probs.size > 0 else 0.0
+    var = float(np.var(probs, ddof=0)) if probs.size > 0 else 0.0
+    # Normalize confidence: 1 - (var / max_bernoulli_var)
+    confidence = max(0.0, 1.0 - (var / 0.25))
 
-    # OOD confidence-based rejection: if the maximum sampled probability
-    # across MC runs is below a conservative threshold, treat as OOD and reject.
-    max_prob = float(np.max(probs)) if probs.size > 0 else 0.0
-    if max_prob < OOD_CONF_THRESHOLD:
-        reason_out = {"code": "low_confidence_ood", "max_prob": float(round(max_prob, 4))}
-        err = InferenceOutput(status="REJECT", cataract_prob=None, confidence=float(round(confidence, 4)), action="REJECT", reason=reason_out)
-        return json.dumps(err.model_dump())
+    # Decide action conservatively
+    action = decide_action(mean_prob, var, confidence)
 
-    # Action policy
-    if confidence >= 0.8:
-        action = "PREDICT"
-    elif 0.5 <= confidence < 0.8:
-        action = "REFER_TO_SPECIALIST"
-    else:
-        action = "REJECT"
+    # Build the strict schema payload
+    payload = {
+        "cataract_prob": round(float(mean_prob), 4),
+        "confidence": round(float(confidence), 4),
+        "action": action,
+    }
 
-    status_out = "PREDICT" if action != "REJECT" else "REJECT"
+    # Validate output strictly using Pydantic
+    try:
+        validated = InferenceOutputSchema(**payload)
+    except ValidationError as e:
+        # Hard failure if schema invalid
+        raise
 
-    reason_out = None
-    if action == "REJECT":
-        reason_out = {"code": "LOW_CONFIDENCE", "confidence": float(confidence), "variance": float(var)}
-
-    result = InferenceOutput(
-        status=status_out,
-        cataract_prob=(round(float(mean_prob), 4) if action != "REJECT" else None),
-        confidence=(round(float(confidence), 4) if action != "REJECT" else None),
-        action=action,
-        reason=reason_out,
-    )
-
-    # Explainability: generate Grad-CAM deterministically
+    # Optionally explain
     if explain:
         try:
-            model.eval()
             os.makedirs("outputs", exist_ok=True)
             gradcam_path = os.path.join("outputs", "gradcam_image.jpg")
             generate_gradcam(model, img_tensor, target_class=1, out_path=gradcam_path)
             with open(os.path.join("outputs", "result.json"), "w") as f:
-                json.dump(result.model_dump(), f)
+                json.dump(validated.model_dump(), f)
         except Exception:
             pass
 
-    # Validate and return JSON
-    try:
-        # model_dump returns a dict that is JSON serializable
-        validated = result.model_dump()
-        return json.dumps(validated)
-    except ValidationError as e:
-        # In the unlikely event validation fails, return explicit rejection
-        err = InferenceOutput(status="REJECT", cataract_prob=None, confidence=None, action="REJECT", reason={"code": "SCHEMA_VALIDATION_ERROR", "detail": str(e)})
-        return json.dumps(err.model_dump())
+    return json.dumps(validated.model_dump())
 
 
 def _cli():
@@ -106,8 +89,9 @@ def _cli():
     parser.add_argument("--explain", action="store_true")
     parser.add_argument("--weights", default=None)
     parser.add_argument("--n-mc", type=int, default=15)
+    parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
-    out = infer(args.image, explain=args.explain, n_mc=args.n_mc, weights_path=args.weights)
+    out = infer(args.image, explain=args.explain, n_mc=args.n_mc, weights_path=args.weights, seed=args.seed)
     print(out)
 
 

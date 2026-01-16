@@ -42,9 +42,9 @@ Key preprocessing steps: Resize to 224x224, normalize with ImageNet stats
 TEAM DETAILS
 ====================
 Team Number: [Your Team Number]
-Team Name: [Your Team Name]
-Institution / Organization: [Your Institution]
+Team Name: UpayaAI
+Institution / Organization: MSCB University, Odisha
 
 Primary Contact:
-- Name: [Your Name]
-- Email: [Your Email]
+- Name: Chandra Shekhar
+- Email: shekhar.it99@gmail.com

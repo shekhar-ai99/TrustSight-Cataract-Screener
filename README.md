@@ -1,33 +1,50 @@
-# TrustSight – Cataract Screener
-### NHA–IITK–ICMR Federated Intelligence Hackathon
+# Model Submission for NHA–IITK–ICMR Federated Intelligence Hackathon
 
-**TrustSight** is a deterministic, offline-first AI system for **cataract screening**  
-designed for public health deployment under the National Health Authority (NHA).
+## 5.1 Model Overview
+Model Name: TrustSight Cataract Screener
+Task Type: Binary Classification (Cataract Detection)
+Framework: PyTorch
+Framework Version: 2.0.1
 
-> ⚠️ This system is a **screening aid**, not a diagnostic tool.
+## 5.2 Input / Output Specification
+Input:
+- Shape: list of strings or numpy.ndarray of shape (N, H, W, 3) or torch.Tensor
+- Dtype: str for list, float32 for arrays
+- Description: Image paths or RGB images (0-255 range)
 
----
+Output:
+- Shape: (N,) where N is batch size
+- Meaning of each dimension: Probability of cataract presence (0.0 to 1.0)
 
-## Phase 0 Status
-- ✅ Scope frozen
-- ✅ Deterministic inference
-- ✅ CPU-only, offline compatible
-- ✅ Version-pinned dependencies
+## 5.3 How to Replicate Predictions (MANDATORY)
+```bash
+tar -xvzf model.tar.gz
+pip install -r requirements.txt
+python test.py
+```
 
----
+Python usage:
 
-## Core Principles
-- **Reliability:** Image Quality Assessment (IQA) gate
-- **Transparency:** Monte Carlo Dropout for uncertainty
-- **Openness:** Deterministic, auditable pipeline
+```python
+import sys
+sys.path.append("code")
+import inference
+preds = inference.predict(test_data)  # test_data is list of paths
+```
 
----
+## 5.4 Training Summary (High-Level Only)
+Dataset used: Phase-1 frozen dataset
+Loss function: Binary Cross-Entropy
+Optimizer: Adam
+Key preprocessing steps: Resize to 224x224, normalize with ImageNet stats
 
-## Optimization Strategy
-- **High Specificity over Sensitivity**
-- Conservative predictions
-- Uncertain cases → *Refer to Specialist*
+====================
+TEAM DETAILS
+====================
+Team Number: [Your Team Number]
+Team Name: [Your Team Name]
+Institution / Organization: [Your Institution]
 
----
-
-## Repository Structure
+Primary Contact:
+- Name: [Your Name]
+- Email: [Your Email]

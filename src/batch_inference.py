@@ -2,7 +2,7 @@ import os
 import sys
 import csv
 import json
-from .inference import infer
+from .infer import infer
 
 
 def batch_run(input_dir: str, out_csv: str = "batch_results.csv"):

@@ -10,7 +10,7 @@ Only returns one of: "PREDICT", "REFER", "REJECT".
 from typing import Literal
 
 
-def decide_action(mean_prob: float, var: float, confidence: float) -> Literal["PREDICT", "REFER", "REJECT"]:
+def decide_action(mean_prob: float, var: float, confidence: float) -> Literal["PREDICT", "REFER_TO_SPECIALIST", "REJECT"]:
     # Conservative thresholds chosen to favor specificity and safety.
     # If model is very confident (confidence >= 0.85) and variance low -> PREDICT
     if confidence >= 0.85 and var <= 0.02:
@@ -18,7 +18,7 @@ def decide_action(mean_prob: float, var: float, confidence: float) -> Literal["P
 
     # Medium confidence -> REFER for clinician review
     if 0.6 <= confidence < 0.85 or (var > 0.02 and confidence >= 0.5):
-        return "REFER"
+        return "REFER_TO_SPECIALIST"
 
     # Fallback: REJECT for very uncertain or low confidence
     return "REJECT"

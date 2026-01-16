@@ -3,10 +3,11 @@ from typing import Literal
 
 
 class InferenceOutputSchema(BaseModel):
-    # Strict schema required by Phase 2
-    cataract_prob: confloat(ge=0.0, le=1.0)
+    # Strict schema for federated evaluation
+    prediction: Literal["CATARACT_PRESENT", "NORMAL"]
     confidence: confloat(ge=0.0, le=1.0)
-    action: Literal["PREDICT", "REFER", "REJECT"]
+    uncertainty: Literal["LOW", "MEDIUM", "HIGH"]
+    action: Literal["PREDICT", "REFER_TO_SPECIALIST", "REJECT"]
 
     class Config:
         extra = "forbid"

@@ -1,6 +1,8 @@
 import json
 import argparse
 import os
+import time
+import psutil
 from .utils import set_seed
 from .model import CataractModel
 from .preprocess import load_image_to_tensor
@@ -15,10 +17,12 @@ import numpy as np
 from pydantic import ValidationError
 
 
-set_seed()
+set_seed(seed=42)
+torch.use_deterministic_algorithms(True)
+torch.backends.cudnn.benchmark = False
 
 
-def infer(image_path: str, explain: bool = False, n_mc: int = 15, weights_path: str | None = None, seed: int = 42):
+def infer(image_path: str, explain: bool = False, n_mc: int = 15, weights_path: str | None = None, seed: int = 42, competition_mode: bool = True):
     """Main inference pipeline for Phase 2.
 
     - Runs IQA gate first and returns the exact JSON on IQA failure.
@@ -26,6 +30,7 @@ def infer(image_path: str, explain: bool = False, n_mc: int = 15, weights_path: 
     - Computes mean, variance, confidence and decides action.
     - Validates final output against the strict Pydantic schema.
     """
+    start_time = time.time()
     # Determinism
     set_seed(seed)
 
@@ -56,9 +61,12 @@ def infer(image_path: str, explain: bool = False, n_mc: int = 15, weights_path: 
     action = decide_action(mean_prob, var, confidence)
 
     # Build the strict schema payload
+    prediction = "CATARACT_PRESENT" if mean_prob >= 0.5 else "NORMAL"
+    uncertainty = "LOW" if confidence >= 0.8 else "MEDIUM" if confidence >= 0.5 else "HIGH"
     payload = {
-        "cataract_prob": round(float(mean_prob), 4),
+        "prediction": prediction,
         "confidence": round(float(confidence), 4),
+        "uncertainty": uncertainty,
         "action": action,
     }
 
@@ -70,7 +78,7 @@ def infer(image_path: str, explain: bool = False, n_mc: int = 15, weights_path: 
         raise
 
     # Optionally explain
-    if explain:
+    if explain and not competition_mode:
         try:
             os.makedirs("outputs", exist_ok=True)
             gradcam_path = os.path.join("outputs", "gradcam_image.jpg")
@@ -79,6 +87,12 @@ def infer(image_path: str, explain: bool = False, n_mc: int = 15, weights_path: 
                 json.dump(validated.model_dump(), f)
         except Exception:
             pass
+
+    latency = time.time() - start_time
+    ram_usage = psutil.virtual_memory().used / (1024 ** 3)
+    if not competition_mode:
+        print(f"Inference latency: {latency:.2f}s")
+        print(f"Peak RAM usage: {ram_usage:.2f}GB")
 
     return json.dumps(validated.model_dump())
 
@@ -90,8 +104,9 @@ def _cli():
     parser.add_argument("--weights", default=None)
     parser.add_argument("--n-mc", type=int, default=15)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--competition-mode", action="store_true", default=True)
     args = parser.parse_args()
-    out = infer(args.image, explain=args.explain, n_mc=args.n_mc, weights_path=args.weights, seed=args.seed)
+    out = infer(args.image, explain=args.explain, n_mc=args.n_mc, weights_path=args.weights, seed=args.seed, competition_mode=args.competition_mode)
     print(out)
 
 

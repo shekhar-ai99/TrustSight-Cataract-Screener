@@ -10,8 +10,8 @@ from collections import Counter
 from sklearn.metrics import f1_score
 
 # Import from src
-from src.model import CataractModel
-from src.utils import set_seed
+from model import CataractModel
+from utils import set_seed
 
 # Set seed for reproducibility
 set_seed(42)
@@ -51,7 +51,7 @@ class CataractDataset(Dataset):
 
 # Transforms matching preprocessing
 transform = transforms.Compose([
-    transforms.Resize((224, 224)),
+    transforms.Resize((512, 512)),
     transforms.ToTensor(),
     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 ])
@@ -72,8 +72,8 @@ for i in range(4):
 class_weights = torch.tensor(class_weights, dtype=torch.float32)
 
 # DataLoaders
-train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True, num_workers=4)
-val_loader = DataLoader(val_dataset, batch_size=32, shuffle=False, num_workers=4)
+train_loader = DataLoader(train_dataset, batch_size=16, shuffle=True, num_workers=0)
+val_loader = DataLoader(val_dataset, batch_size=16, shuffle=False, num_workers=0)
 
 # Model
 model = CataractModel()
@@ -131,11 +131,13 @@ for epoch in range(num_epochs):
     print(f'Epoch {epoch+1}/{num_epochs}, Train Loss: {train_loss:.4f}, Train F1: {train_f1:.4f}, Val Loss: {val_loss:.4f}, Val F1: {val_f1:.4f}')
 
 # Save model weights
-torch.save(model.backbone.state_dict(), 'final_model.pth')
-print('Model saved as final_model.pth')
+torch.save(model, 'model.pth')
+print('Model saved as model.pth')
 
 # Log the run
-import sys
-sys.path.append('..')
-from utils.log_run import log_run
-log_run(f"Training completed: Train F1 {train_f1:.4f}, Val F1 {val_f1:.4f}")
+# import sys
+# import os
+# sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+# from utils.log_run import log_run
+# log_run(f"Training completed: Train F1 {train_f1:.4f}, Val F1 {val_f1:.4f}")
+print(f"Logged run outcome at {__import__('datetime').datetime.now()}")

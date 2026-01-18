@@ -2,7 +2,7 @@
 
 ## 5.1 Model Overview
 Model Name: TrustSight Cataract Screener
-Task Type: Binary Classification (Cataract Detection)
+Task Type: Multi-Class Classification (4-class Cataract Screening)
 Framework: PyTorch
 Framework Version: 2.0.1
 
@@ -13,8 +13,8 @@ Input:
 - Description: Image paths or RGB images (0-255 range)
 
 Output:
-- Shape: (N,) where N is batch size
-- Meaning of each dimension: Probability of cataract presence (0.0 to 1.0)
+- Shape: list of dicts, each with keys 'predicted_class', 'class_probs', 'confidence', 'uncertainty'
+- Meaning: predicted_class (str: "No Cataract", "Immature Cataract", "Mature Cataract", "IOL Inserted"), class_probs (dict of 4 floats), confidence (float), uncertainty (str: "LOW", "MEDIUM", "HIGH")
 
 ## 5.3 How to Replicate Predictions (MANDATORY)
 ```bash
@@ -34,8 +34,8 @@ preds = inference.predict(test_data)  # test_data is list of paths
 
 ## 5.4 Training Summary (High-Level Only)
 Dataset used: Phase-1 frozen dataset
-Loss function: Binary Cross-Entropy
-Optimizer: Adam
+Loss function: Cross-Entropy Loss (4 classes)
+Optimizer: AdamW
 Key preprocessing steps: Resize to 224x224, normalize with ImageNet stats
 
 ====================

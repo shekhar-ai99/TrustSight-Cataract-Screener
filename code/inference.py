@@ -86,8 +86,8 @@ def _load_model():
 
 def predict(batch):
     """
-    Input: batch (list of image paths or numpy array of images)
-    Output: list of dicts with 'predicted_class', 'class_probs', 'confidence', 'uncertainty'
+    Input: list | numpy.ndarray | torch.Tensor
+    Output: numpy.ndarray
     """
     _load_model()
     if isinstance(batch, torch.Tensor):
@@ -105,7 +105,8 @@ def predict(batch):
                 "predicted_class": "REJECT",
                 "class_probs": {name: 0.0 for name in CLASS_NAMES},
                 "confidence": 0.0,
-                "uncertainty": "HIGH"
+                "uncertainty": "HIGH",
+                "action": "REJECT"
             })
             continue
         transform = A.Compose([
@@ -126,15 +127,19 @@ def predict(batch):
         variance = np.var(pred_class_probs)
         if variance < 0.01:
             uncertainty = "LOW"
+            action = "PREDICT"
         elif variance < 0.05:
             uncertainty = "MEDIUM"
+            action = "PREDICT"
         else:
             uncertainty = "HIGH"
+            action = "REFER_TO_SPECIALIST"
         class_probs = {CLASS_NAMES[i]: float(mean_probs[i]) for i in range(4)}
         results.append({
             "predicted_class": predicted_class,
             "class_probs": class_probs,
             "confidence": confidence,
-            "uncertainty": uncertainty
+            "uncertainty": uncertainty,
+            "action": action
         })
-    return results
+    return np.array(results)

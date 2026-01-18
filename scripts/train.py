@@ -133,3 +133,9 @@ for epoch in range(num_epochs):
 # Save model weights
 torch.save(model.backbone.state_dict(), 'final_model.pth')
 print('Model saved as final_model.pth')
+
+# Log the run
+import sys
+sys.path.append('..')
+from utils.log_run import log_run
+log_run(f"Training completed: Train F1 {train_f1:.4f}, Val F1 {val_f1:.4f}")

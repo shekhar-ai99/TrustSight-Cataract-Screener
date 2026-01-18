@@ -1,9 +1,21 @@
 import torch
 import numpy as np
+from efficientnet_pytorch import EfficientNet
+import torch.nn as nn
 
 _model = None
 CLASS_COUNT = 4
 VECTOR_SIZE = 512 * 512 * 3
+
+class CataractModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.backbone = EfficientNet.from_name("efficientnet-b0")
+        in_features = self.backbone._fc.weight.shape[1]
+        self.backbone._fc = nn.Linear(in_features, 4)
+
+    def forward(self, x):
+        return self.backbone(x)
 
 def _enable_mc_dropout(model):
     """Enable dropout layers during inference."""

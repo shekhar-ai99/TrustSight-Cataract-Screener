@@ -8,6 +8,7 @@ from PIL import Image
 import numpy as np
 from collections import Counter
 from sklearn.metrics import f1_score
+import datetime
 
 # Import from src
 from model import CataractModel
@@ -57,8 +58,9 @@ transform = transforms.Compose([
 ])
 
 # Load datasets
-train_dataset = CataractDataset('data/train', transform=transform)
-val_dataset = CataractDataset('data/val', transform=transform)
+data_root = os.path.join(os.path.dirname(__file__), '..', 'data')
+train_dataset = CataractDataset(os.path.join(data_root, 'train'), transform=transform)
+val_dataset = CataractDataset(os.path.join(data_root, 'val'), transform=transform)
 
 # Handle class imbalance
 train_labels = [label for _, label in train_dataset]
@@ -131,8 +133,30 @@ for epoch in range(num_epochs):
     print(f'Epoch {epoch+1}/{num_epochs}, Train Loss: {train_loss:.4f}, Train F1: {train_f1:.4f}, Val Loss: {val_loss:.4f}, Val F1: {val_f1:.4f}')
 
 # Save model weights
-torch.save(model, 'model.pth')
-print('Model saved as model.pth')
+ist = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+date_str = datetime.datetime.now(ist).strftime('%Y-%m-%d')
+time_str = datetime.datetime.now(ist).strftime('%H-%M-%S')
+folder_name = f'model_{date_str}_{time_str}_F1_{val_f1:.4f}'
+root_dir = os.path.join(os.path.dirname(__file__), '..', 'test_submission')
+folder_path = os.path.join(root_dir, folder_name)
+os.makedirs(folder_path, exist_ok=True)
+model_path = os.path.join(folder_path, 'model.pth')
+torch.save(model, model_path)
+print(f'Model saved as {model_path}')
+# Copy fixed files to folder for tar.gz
+import shutil
+shutil.copy(os.path.join(os.path.dirname(__file__), '..', 'requirements.txt'), folder_path)
+shutil.copy(os.path.join(os.path.dirname(__file__), '..', 'README.md'), folder_path)
+shutil.copytree(os.path.join(os.path.dirname(__file__), '..', 'code'), os.path.join(folder_path, 'code'), dirs_exist_ok=True)
+
+# Create tar.gz in the folder
+tar_path = os.path.join(folder_path, 'model.tar.gz')
+os.system(f'cd {folder_path} && tar -czf model.tar.gz model.pth requirements.txt README.md code/')
+print(f'Tar.gz created as {tar_path}')
+# Also save in root for submission
+root_model_path = os.path.join(root_dir, 'model.pth')
+torch.save(model, root_model_path)
+print('Model also saved as model.pth')
 
 # Log the run
 # import sys

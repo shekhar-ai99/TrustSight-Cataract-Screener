@@ -14,7 +14,7 @@ Input:
 
 Output:
 - Shape: (N, 4)
-- Order: [No Cataract, Immature Cataract, Mature Cataract, IOL Inserted]
+- Meaning: Probabilities for [No Cataract, Immature Cataract, Mature Cataract, IOL Inserted]
 
 ## 5.3 How to Replicate Predictions
 tar -xvzf model.tar.gz

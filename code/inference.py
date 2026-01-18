@@ -15,7 +15,7 @@ class CataractModel(nn.Module):
         super().__init__()
         self.backbone = EfficientNet.from_name("efficientnet-b0")
         in_features = self.backbone._fc.weight.shape[1]
-        self.backbone._fc = nn.Linear(in_features, 1)
+        self.backbone._fc = nn.Linear(in_features, 4)
 
     def forward(self, x, mc: bool = False):
         out = self.backbone(x)
@@ -39,7 +39,7 @@ class CataractModel(nn.Module):
             for _ in range(n_samples):
                 with torch.no_grad():
                     logit = self.forward(x)
-                    prob = torch.sigmoid(logit).item()
+                    prob = torch.softmax(logit, dim=-1).squeeze().cpu().numpy().tolist()
                     probs.append(prob)
         finally:
             for m, train in orig_training.items():
@@ -71,6 +71,9 @@ def mc_inference(model, img_tensor, n_mc=15, seed=42):
     torch.manual_seed(seed)
     return model.safe_mc_forward(img_tensor, n_samples=n_mc)
 
+# Class labels
+CLASS_NAMES = ["No Cataract", "Immature Cataract", "Mature Cataract", "IOL Inserted"]
+
 # Global model
 _model = None
 
@@ -78,13 +81,13 @@ def _load_model():
     global _model
     if _model is None:
         _model = CataractModel()
-        _model.backbone.load_state_dict(torch.load("model.pth", map_location="cpu"))
+        _model.backbone.load_state_dict(torch.load("final_model.pth", map_location="cpu"))
         _model.eval()
 
 def predict(batch):
     """
     Input: batch (list of image paths or numpy array of images)
-    Output: numpy.ndarray of shape (N,) with probabilities
+    Output: list of dicts with 'predicted_class', 'class_probs', 'confidence', 'uncertainty'
     """
     _load_model()
     if isinstance(batch, torch.Tensor):
@@ -98,7 +101,12 @@ def predict(batch):
             img = item  # assume np.ndarray (H, W, C)
         status, reason = check_image_quality(img)
         if status == "REJECT":
-            results.append(0.5)  # neutral prob
+            results.append({
+                "predicted_class": "REJECT",
+                "class_probs": {name: 0.0 for name in CLASS_NAMES},
+                "confidence": 0.0,
+                "uncertainty": "HIGH"
+            })
             continue
         transform = A.Compose([
             A.Resize(224, 224),
@@ -108,7 +116,25 @@ def predict(batch):
         transformed = transform(image=img)
         img_arr = transformed["image"]
         img_tensor = torch.tensor(img_arr, dtype=torch.float32).permute(2, 0, 1).unsqueeze(0)
-        probs = mc_inference(_model, img_tensor, n_mc=15, seed=42)
-        mean_prob = np.mean(probs)
-        results.append(mean_prob)
-    return np.array(results)
+        mc_probs = mc_inference(_model, img_tensor, n_mc=15, seed=42)
+        mean_probs = np.mean(mc_probs, axis=0)
+        pred_class = np.argmax(mean_probs)
+        predicted_class = CLASS_NAMES[pred_class]
+        confidence = float(np.max(mean_probs))
+        # Uncertainty as variance of the predicted class prob
+        pred_class_probs = [sample[pred_class] for sample in mc_probs]
+        variance = np.var(pred_class_probs)
+        if variance < 0.01:
+            uncertainty = "LOW"
+        elif variance < 0.05:
+            uncertainty = "MEDIUM"
+        else:
+            uncertainty = "HIGH"
+        class_probs = {CLASS_NAMES[i]: float(mean_probs[i]) for i in range(4)}
+        results.append({
+            "predicted_class": predicted_class,
+            "class_probs": class_probs,
+            "confidence": confidence,
+            "uncertainty": uncertainty
+        })
+    return results

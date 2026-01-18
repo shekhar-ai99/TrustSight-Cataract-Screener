@@ -7,6 +7,7 @@ import torchvision.transforms as transforms
 from PIL import Image
 import numpy as np
 from collections import Counter
+from sklearn.metrics import f1_score
 
 # Import from src
 from src.model import CataractModel
@@ -15,14 +16,19 @@ from src.utils import set_seed
 # Set seed for reproducibility
 set_seed(42)
 
-# Custom Dataset for binary classification
+# Custom Dataset for 4-class classification
 class CataractDataset(Dataset):
     def __init__(self, root_dir, transform=None):
         self.root_dir = root_dir
         self.transform = transform
         self.samples = []
         self.labels = []
-        self.class_to_idx = {'normal': 0, 'cataract': 1}
+        self.class_to_idx = {
+            'No_Cataract': 0,
+            'Immature_Cataract': 1,
+            'Mature_Cataract': 2,
+            'IOL_Inserted': 3
+        }
 
         for class_name, label in self.class_to_idx.items():
             class_dir = os.path.join(root_dir, class_name)
@@ -41,7 +47,7 @@ class CataractDataset(Dataset):
         image = Image.open(img_path).convert('RGB')
         if self.transform:
             image = self.transform(image)
-        return image, torch.tensor(label, dtype=torch.float32)
+        return image, torch.tensor(label, dtype=torch.long)
 
 # Transforms matching preprocessing
 transform = transforms.Compose([
@@ -57,9 +63,13 @@ val_dataset = CataractDataset('data/val', transform=transform)
 # Handle class imbalance
 train_labels = [label for _, label in train_dataset]
 label_counts = Counter(train_labels)
-num_normal = label_counts[0]
-num_cataract = label_counts[1]
-pos_weight = torch.tensor(num_normal / num_cataract) if num_cataract > 0 else torch.tensor(1.0)
+total_samples = len(train_labels)
+class_weights = []
+for i in range(4):
+    count = label_counts.get(i, 0)
+    weight = total_samples / (4 * count) if count > 0 else 1.0
+    class_weights.append(weight)
+class_weights = torch.tensor(class_weights, dtype=torch.float32)
 
 # DataLoaders
 train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True, num_workers=4)
@@ -72,55 +82,54 @@ model.to(device)
 
 # Optimizer and Loss
 optimizer = optim.AdamW(model.parameters(), lr=1e-4)
-criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight.to(device))
+criterion = nn.CrossEntropyLoss(weight=class_weights.to(device))
 
 # Training loop
 num_epochs = 10
 for epoch in range(num_epochs):
     model.train()
     train_loss = 0.0
-    train_correct = 0
-    train_total = 0
+    train_preds = []
+    train_labels_list = []
 
     for images, labels in train_loader:
         images, labels = images.to(device), labels.to(device)
         optimizer.zero_grad()
-        outputs = model(images).squeeze()
+        outputs = model(images)
         loss = criterion(outputs, labels)
         loss.backward()
         optimizer.step()
 
         train_loss += loss.item()
-        preds = torch.sigmoid(outputs) > 0.5
-        train_correct += (preds == labels.byte()).sum().item()
-        train_total += labels.size(0)
+        preds = torch.argmax(outputs, dim=1)
+        train_preds.extend(preds.cpu().numpy())
+        train_labels_list.extend(labels.cpu().numpy())
 
-    train_acc = train_correct / train_total
+    train_f1 = f1_score(train_labels_list, train_preds, average='macro')
     train_loss /= len(train_loader)
 
     # Validation
     model.eval()
     val_loss = 0.0
-    val_correct = 0
-    val_total = 0
+    val_preds = []
+    val_labels_list = []
 
     with torch.no_grad():
         for images, labels in val_loader:
             images, labels = images.to(device), labels.to(device)
-            outputs = model(images).squeeze()
+            outputs = model(images)
             loss = criterion(outputs, labels)
 
             val_loss += loss.item()
-            preds = torch.sigmoid(outputs) > 0.5
-            val_correct += (preds == labels.byte()).sum().item()
-            val_total += labels.size(0)
+            preds = torch.argmax(outputs, dim=1)
+            val_preds.extend(preds.cpu().numpy())
+            val_labels_list.extend(labels.cpu().numpy())
 
-    val_acc = val_correct / val_total
+    val_f1 = f1_score(val_labels_list, val_preds, average='macro')
     val_loss /= len(val_loader)
 
-    print(f'Epoch {epoch+1}/{num_epochs}, Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f}, Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}')
+    print(f'Epoch {epoch+1}/{num_epochs}, Train Loss: {train_loss:.4f}, Train F1: {train_f1:.4f}, Val Loss: {val_loss:.4f}, Val F1: {val_f1:.4f}')
 
 # Save model weights
 torch.save(model.backbone.state_dict(), 'final_model.pth')
-print('Model saved as final_model.pth')</content>
-<parameter name="filePath">/workspaces/TrustSight-Cataract-Screener/scripts/train.py
+print('Model saved as final_model.pth')

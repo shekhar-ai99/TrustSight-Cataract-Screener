@@ -20,7 +20,7 @@ class CataractModel(nn.Module):
         in_features = getattr(self.backbone._fc, "in_features", None)
         if in_features is None:
             in_features = self.backbone._fc.weight.shape[1]
-        self.backbone._fc = nn.Linear(in_features, 1)
+        self.backbone._fc = nn.Linear(in_features, 4)
 
     def forward(self, x, mc: bool = False):
         # Default behavior: just run backbone. MC behavior is handled by safe_mc_forward
@@ -44,7 +44,7 @@ class CataractModel(nn.Module):
         Perform MC Dropout forward passes without permanently mutating model state.
         Temporarily set the model to train() so dropout is active, run passes under
         torch.no_grad(), then restore all modules' training flags to their originals.
-        Returns a list of probabilities (floats) of length n_samples.
+        Returns a list of probability arrays (length n_samples) each of shape (4,).
         """
         orig_training = {m: m.training for m in self.modules()}
         try:
@@ -55,12 +55,12 @@ class CataractModel(nn.Module):
                 for _ in range(n_samples):
                     out = self.forward(x)
                     # handle possible tensor shapes
-                    p_tensor = torch.sigmoid(out)
+                    p_tensor = F.softmax(out, dim=-1)
                     p = p_tensor.squeeze().cpu().numpy()
-                    # Ensure we append a scalar or 1-d array consistently
+                    # Ensure we append a list consistently
                     if hasattr(p, "tolist"):
                         p = p.tolist()
-                    probs.append(float(p) if isinstance(p, (float, int)) else p)
+                    probs.append(p)
             return probs
         finally:
             # Restore original training flags
@@ -71,16 +71,17 @@ class CataractModel(nn.Module):
         """
         If n_mc == 1: deterministic prediction with dropout disabled.
         If n_mc > 1: perform MC Dropout sampling using safe_mc_forward.
+        Returns list of probability arrays.
         """
         if n_mc <= 1:
             with torch.no_grad():
                 logits = self.forward(x)
-                probs = torch.sigmoid(logits).squeeze().cpu().numpy()
-            # Return a list for consistency when downstream expects iterable
-            if isinstance(probs, (float, int)):
-                return [float(probs)]
-            return probs.tolist()
+                probs = F.softmax(logits, dim=-1).squeeze().cpu().numpy()
+            # Return a list for consistency
+            if probs.ndim == 0:
+                return [probs.tolist()]
+            return [probs.tolist()]
         else:
             probs = self.safe_mc_forward(x, n_samples=n_mc)
-            # safe_mc_forward already returns list of floats
+            # safe_mc_forward already returns list of lists
             return probs

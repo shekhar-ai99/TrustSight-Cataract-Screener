@@ -3,6 +3,7 @@
 ## 5.1 Model Overview
 Model Name: TrustSight Cataract Screener
 Task Type: Multi-Class Classification (4-class Cataract Screening)
+Problem: Cataract Detection (CDIS – Roshni Study)
 Framework: PyTorch
 Framework Version: 2.0.1
 

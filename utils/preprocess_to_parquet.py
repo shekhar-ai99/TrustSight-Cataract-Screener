@@ -34,7 +34,14 @@ def main(input_dir, output_parquet):
                 img_path = os.path.join(class_dir, img_name)
                 try:
                     img_vector = preprocess_image(img_path)
-                    data.append({'image_vector': img_vector, 'label': label})
+                    cataract_type = class_name  # e.g., 'No_Cataract'
+                    data.append({
+                        'image_vector': img_vector, 
+                        'label': label,
+                        'cataract_type': cataract_type,
+                        'image_quality': 'Good',
+                        'age_group': '>=50'
+                    })
                 except Exception as e:
                     print(f"Error processing {img_path}: {e}")
     

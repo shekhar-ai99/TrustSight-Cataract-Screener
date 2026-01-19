@@ -1,9 +1,0 @@
-torch==2.2.0
-torchvision==0.17.0
-efficientnet-pytorch==0.7.1
-opencv-python-headless==4.9.0.80
-albumentations==1.4.0
-numpy==1.26.0
-pyarrow==15.0.0
-pandas==2.2.0
-scikit-learn==1.4.0

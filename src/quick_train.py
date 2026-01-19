@@ -2,7 +2,7 @@ import os
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, random_split
 import torchvision.transforms as transforms
 from PIL import Image
 import numpy as np
@@ -52,19 +52,54 @@ class CataractDataset(Dataset):
 
 # Transforms matching preprocessing
 transform = transforms.Compose([
-    transforms.Resize((512, 512)),
+    transforms.Resize((256, 256)),  # Smaller size for faster training
     transforms.ToTensor(),
     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 ])
 
 # Load datasets
 data_root = os.path.join(os.path.dirname(__file__), '..', 'Dataset')
-# Use only training_images dataset for both train and val
-train_dataset = CataractDataset(os.path.join(data_root, 'training_small'), transform=transform)
-val_dataset = CataractDataset(os.path.join(data_root, 'training_small'), transform=transform)
+print("Loading training dataset...")
+train_dataset_full = CataractDataset(os.path.join(data_root, 'training_images'), transform=transform)
+print(f"Training dataset loaded: {len(train_dataset_full)} images")
+
+print("Loading test dataset...")
+test_dataset_full = CataractDataset(os.path.join(data_root, 'test_extracted'), transform=transform)
+print(f"Test dataset loaded: {len(test_dataset_full)} images")
+
+# Combine both datasets
+combined_samples = train_dataset_full.samples + test_dataset_full.samples
+combined_labels = train_dataset_full.labels + test_dataset_full.labels
+
+class CombinedDataset(Dataset):
+    def __init__(self, samples, labels, transform=None):
+        self.samples = samples
+        self.labels = labels
+        self.transform = transform
+    
+    def __len__(self):
+        return len(self.samples)
+    
+    def __getitem__(self, idx):
+        img_path = self.samples[idx]
+        label = self.labels[idx]
+        image = Image.open(img_path).convert('RGB')
+        if self.transform:
+            image = self.transform(image)
+        return image, torch.tensor(label, dtype=torch.long)
+
+# Create combined dataset
+combined_dataset = CombinedDataset(combined_samples, combined_labels, transform=transform)
+print(f"Combined dataset: {len(combined_dataset)} images total")
+
+# Split into train and val
+train_size = int(0.8 * len(combined_dataset))
+val_size = len(combined_dataset) - train_size
+full_dataset, val_dataset = random_split(combined_dataset, [train_size, val_size])
 
 # Handle class imbalance
-train_labels = [label for _, label in train_dataset]
+train_indices = full_dataset.indices
+train_labels = [combined_labels[i] for i in train_indices]
 label_counts = Counter(train_labels)
 total_samples = len(train_labels)
 class_weights = []
@@ -73,14 +108,18 @@ for i in range(4):
     weight = total_samples / (4 * count) if count > 0 else 1.0
     class_weights.append(weight)
 class_weights = torch.tensor(class_weights, dtype=torch.float32)
+print(f"Class weights: {class_weights}")
 
 # DataLoaders
-train_loader = DataLoader(train_dataset, batch_size=8, shuffle=True, num_workers=0)
-val_loader = DataLoader(val_dataset, batch_size=8, shuffle=False, num_workers=0)
+train_loader = DataLoader(full_dataset, batch_size=4, shuffle=True, num_workers=0)
+val_loader = DataLoader(val_dataset, batch_size=4, shuffle=False, num_workers=0)
+
+print(f"Train batches: {len(train_loader)}, Val batches: {len(val_loader)}")
 
 # Model
+print("Creating model...")
 model = CataractModel()
-device = torch.device('cpu')  # Force CPU to avoid memory issues
+device = torch.device('cpu')  # Use CPU to avoid memory issues
 model.to(device)
 
 # Optimizer and Loss
@@ -88,14 +127,16 @@ optimizer = optim.AdamW(model.parameters(), lr=1e-4)
 criterion = nn.CrossEntropyLoss(weight=class_weights.to(device))
 
 # Training loop
-num_epochs = 5
+num_epochs = 3  # Fewer epochs for quick training
+print(f"Starting training for {num_epochs} epochs...")
 for epoch in range(num_epochs):
     model.train()
     train_loss = 0.0
     train_preds = []
     train_labels_list = []
 
-    for images, labels in train_loader:
+    for batch_idx, (images, labels) in enumerate(train_loader):
+        print(f"Epoch {epoch+1}/{num_epochs}, Batch {batch_idx+1}/{len(train_loader)}")
         images, labels = images.to(device), labels.to(device)
         optimizer.zero_grad()
         outputs = model(images)
@@ -112,6 +153,7 @@ for epoch in range(num_epochs):
     train_loss /= len(train_loader)
 
     # Validation
+    print("Validating...")
     model.eval()
     val_loss = 0.0
     val_preds = []
@@ -134,6 +176,7 @@ for epoch in range(num_epochs):
     print(f'Epoch {epoch+1}/{num_epochs}, Train Loss: {train_loss:.4f}, Train F1: {train_f1:.4f}, Val Loss: {val_loss:.4f}, Val F1: {val_f1:.4f}')
 
 # Save model weights
+print("Saving model...")
 ist = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
 date_str = datetime.datetime.now(ist).strftime('%Y-%m-%d')
 time_str = datetime.datetime.now(ist).strftime('%H-%M-%S')
@@ -144,25 +187,9 @@ os.makedirs(folder_path, exist_ok=True)
 model_path = os.path.join(folder_path, 'model.pth')
 torch.save(model, model_path)
 print(f'Model saved as {model_path}')
-# Copy fixed files to folder for tar.gz
-import shutil
-shutil.copy(os.path.join(os.path.dirname(__file__), '..', 'requirements.txt'), folder_path)
-shutil.copy(os.path.join(os.path.dirname(__file__), '..', 'README.md'), folder_path)
-shutil.copytree(os.path.join(os.path.dirname(__file__), '..', 'code'), os.path.join(folder_path, 'code'), dirs_exist_ok=True)
 
-# Create tar.gz in the folder
-tar_path = os.path.join(folder_path, 'model.tar.gz')
-os.system(f'cd {folder_path} && tar -czf model.tar.gz model.pth requirements.txt README.md code/')
-print(f'Tar.gz created as {tar_path}')
 # Also save in root for submission
 root_model_path = os.path.join(root_dir, 'model.pth')
 torch.save(model, root_model_path)
 print('Model also saved as model.pth')
-
-# Log the run
-# import sys
-# import os
-# sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-# from utils.log_run import log_run
-# log_run(f"Training completed: Train F1 {train_f1:.4f}, Val F1 {val_f1:.4f}")
-print(f"Logged run outcome at {__import__('datetime').datetime.now()}")
+print(f"Training completed: Train F1 {train_f1:.4f}, Val F1 {val_f1:.4f}")

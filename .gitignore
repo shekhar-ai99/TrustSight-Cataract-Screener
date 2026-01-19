@@ -140,10 +140,10 @@ dmypy.json
 .DS_Store
 Thumbs.db
 
-# # Model weights
-# *.pth
-# *.pt
-# final_model.pth
+# Model weights
+*.pth
+*.pt
+final_model.pth
 
 # Data
 data/

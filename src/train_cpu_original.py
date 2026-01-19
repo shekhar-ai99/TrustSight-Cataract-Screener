@@ -1,0 +1,175 @@
+import os
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import Dataset, DataLoader
+import torchvision.transforms as transforms
+from PIL import Image
+import numpy as np
+import pandas as pd
+import ast
+from collections import Counter
+from sklearn.metrics import f1_score
+import datetime
+
+# Import from src
+from model import CataractModel
+from utils import set_seed
+
+# Set seed for reproducibility
+set_seed(42)
+
+# Custom Dataset for 4-class classification
+class CataractDataset(Dataset):
+    def __init__(self, parquet_path, transform=None):
+        self.transform = transform
+        self.df = pd.read_parquet(parquet_path)
+        self.class_to_idx = {
+            'No_Cataract': 0,
+            'Immature_Cataract': 1,
+            'Mature_Cataract': 2,
+            'IOL_Inserted': 3
+        }
+        self.idx_to_class = {v: k for k, v in self.class_to_idx.items()}
+
+    def __len__(self):
+        return len(self.df)
+
+    def __getitem__(self, idx):
+        row = self.df.iloc[idx]
+        
+        # Get label
+        label = row['label']
+        if isinstance(label, str):
+            label = self.class_to_idx.get(label, 0)
+        
+        # Get image vector
+        image_vector = row['image_vector']
+        if isinstance(image_vector, str):
+            try:
+                image_vector = ast.literal_eval(image_vector)
+            except:
+                image_vector = np.frombuffer(image_vector.encode(), dtype=np.float32)
+        
+        img_array = np.array(image_vector).reshape(512, 512, 3).astype(np.uint8)
+        image = Image.fromarray(img_array).convert('RGB')
+        
+        if self.transform:
+            image = self.transform(image)
+        return image, torch.tensor(label, dtype=torch.long)
+
+# Transforms matching preprocessing
+transform = transforms.Compose([
+    transforms.Resize((512, 512)),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+])
+
+# Load datasets from parquet file
+parquet_path = os.path.join(os.path.dirname(__file__), '..', 'dataset', 'cataract-training-dataset.parquet')
+train_dataset = CataractDataset(parquet_path, transform=transform)
+val_dataset = CataractDataset(parquet_path, transform=transform)
+
+# Handle class imbalance
+train_labels = [label for _, label in train_dataset]
+label_counts = Counter(train_labels)
+total_samples = len(train_labels)
+class_weights = []
+for i in range(4):
+    count = label_counts.get(i, 0)
+    weight = total_samples / (4 * count) if count > 0 else 1.0
+    class_weights.append(weight)
+class_weights = torch.tensor(class_weights, dtype=torch.float32)
+
+# DataLoaders
+train_loader = DataLoader(train_dataset, batch_size=8, shuffle=True, num_workers=0)
+val_loader = DataLoader(val_dataset, batch_size=8, shuffle=False, num_workers=0)
+
+# Model
+model = CataractModel()
+device = torch.device('cpu')  # Force CPU to avoid memory issues
+model.to(device)
+
+# Optimizer and Loss
+optimizer = optim.AdamW(model.parameters(), lr=1e-4)
+criterion = nn.CrossEntropyLoss(weight=class_weights.to(device))
+
+# Training loop
+num_epochs = 5
+for epoch in range(num_epochs):
+    model.train()
+    train_loss = 0.0
+    train_preds = []
+    train_labels_list = []
+
+    for images, labels in train_loader:
+        images, labels = images.to(device), labels.to(device)
+        optimizer.zero_grad()
+        outputs = model(images)
+        loss = criterion(outputs, labels)
+        loss.backward()
+        optimizer.step()
+
+        train_loss += loss.item()
+        preds = torch.argmax(outputs, dim=1)
+        train_preds.extend(preds.cpu().numpy())
+        train_labels_list.extend(labels.cpu().numpy())
+
+    train_f1 = f1_score(train_labels_list, train_preds, average='macro')
+    train_loss /= len(train_loader)
+
+    # Validation
+    model.eval()
+    val_loss = 0.0
+    val_preds = []
+    val_labels_list = []
+
+    with torch.no_grad():
+        for images, labels in val_loader:
+            images, labels = images.to(device), labels.to(device)
+            outputs = model(images)
+            loss = criterion(outputs, labels)
+
+            val_loss += loss.item()
+            preds = torch.argmax(outputs, dim=1)
+            val_preds.extend(preds.cpu().numpy())
+            val_labels_list.extend(labels.cpu().numpy())
+
+    val_f1 = f1_score(val_labels_list, val_preds, average='macro')
+    val_loss /= len(val_loader)
+
+    print(f'Epoch {epoch+1}/{num_epochs}, Train Loss: {train_loss:.4f}, Train F1: {train_f1:.4f}, Val Loss: {val_loss:.4f}, Val F1: {val_f1:.4f}')
+
+# Save model weights
+ist = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+date_str = datetime.datetime.now(ist).strftime('%Y-%m-%d')
+time_str = datetime.datetime.now(ist).strftime('%H-%M-%S')
+folder_name = f'model_{date_str}_{time_str}_F1_{val_f1:.4f}'
+root_dir = os.path.join(os.path.dirname(__file__), '..', 'test_submission')
+folder_path = os.path.join(root_dir, folder_name)
+os.makedirs(folder_path, exist_ok=True)
+model_path = os.path.join(folder_path, 'model.pth')
+torch.save(model, model_path)
+print(f'Model saved as {model_path}')
+# Copy fixed files to folder for tar.gz
+import shutil
+shutil.copy(os.path.join(os.path.dirname(__file__), '..', 'requirements.txt'), folder_path)
+shutil.copy(os.path.join(os.path.dirname(__file__), '..', 'README.md'), folder_path)
+shutil.copytree(os.path.join(os.path.dirname(__file__), '..', 'code'), os.path.join(folder_path, 'code'), dirs_exist_ok=True)
+
+# Create tar.gz in the folder
+tar_path = os.path.join(folder_path, 'model.tar.gz')
+os.system(f'cd {folder_path} && tar -czf model.tar.gz model.pth requirements.txt README.md code/')
+print(f'Tar.gz created as {tar_path}')
+# Also save in root for submission
+root_model_path = os.path.join(root_dir, 'model.pth')
+torch.save(model, root_model_path)
+print('Model also saved as model.pth')
+
+# Log the run
+# import sys
+# import os
+# sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+# from utils.log_run import log_run
+# log_run(f"Training completed: Train F1 {train_f1:.4f}, Val F1 {val_f1:.4f}")
+print(f"Logged run outcome at {__import__('datetime').datetime.now()}")

@@ -10,12 +10,18 @@ class CataractModel(nn.Module):
         super().__init__()
         # Prefer local weights; avoid internet calls in all cases
         if weights_path and os.path.exists(weights_path):
-            self.backbone = EfficientNet.from_name("efficientnet-b0")
+            self.backbone = EfficientNet.from_pretrained(
+                "efficientnet-b0",
+                advprop=False
+            )
             state = torch.load(weights_path, map_location="cpu")
             self.backbone.load_state_dict(state)
         else:
-            # Create architecture without attempting to download pretrained weights
-            self.backbone = EfficientNet.from_name("efficientnet-b0")
+            # Load pretrained EfficientNet-B0 for better initialization
+            self.backbone = EfficientNet.from_pretrained(
+                "efficientnet-b0",
+                advprop=False
+            )
 
         in_features = getattr(self.backbone._fc, "in_features", None)
         if in_features is None:

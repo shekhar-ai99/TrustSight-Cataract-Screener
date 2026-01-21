@@ -10,6 +10,7 @@ Original backup saved as: train_cpu_original.py
 """
 
 import os
+import sys
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -25,6 +26,38 @@ from collections import Counter
 from sklearn.metrics import f1_score
 import datetime
 import time
+
+# Setup logging to file
+class TeeLogger:
+    def __init__(self, log_file):
+        self.terminal = sys.stdout
+        self.log = open(log_file, 'w', encoding='utf-8')
+    
+    def write(self, message):
+        self.terminal.write(message)
+        self.log.write(message)
+        self.log.flush()
+    
+    def flush(self):
+        self.terminal.flush()
+        self.log.flush()
+    
+    def close(self):
+        self.log.close()
+
+# Create run folder and setup logging
+ist = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+run_timestamp = datetime.datetime.now(ist).strftime('%Y-%m-%d_%H-%M-%S')
+run_folder = os.path.join(os.path.dirname(__file__), '..', 'run_reports', f'run_{run_timestamp}')
+os.makedirs(run_folder, exist_ok=True)
+log_file_path = os.path.join(run_folder, 'training.log')
+
+# Redirect stdout to both console and log file
+tee_logger = TeeLogger(log_file_path)
+sys.stdout = tee_logger
+
+print(f"Training run started at: {run_timestamp}")
+print(f"Logs will be saved to: {log_file_path}\n")
 
 # Import from src
 from model import CataractModel
@@ -43,7 +76,8 @@ from config import (
     AUGMENTATION_CLAHE_P, AUGMENTATION_CLAHE_CLIP,
     IMMATURE_EXTRA_AUG, IMMATURE_COLOR_JITTER_BRIGHTNESS, IMMATURE_COLOR_JITTER_CONTRAST,
     IMMATURE_GAUSSIAN_BLUR_KERNEL, IMMATURE_GAUSSIAN_BLUR_SIGMA,
-    CLASS_WEIGHTS, FREEZE_BACKBONE_UNTIL_EPOCH, CLASS_WEIGHT_POWER,
+    CLASS_WEIGHTS, FREEZE_BACKBONE_UNTIL_EPOCH, UNFREEZE_LR, CLASS_WEIGHT_POWER,
+    LABEL_SMOOTHING, GRADIENT_ACCUMULATION_STEPS,
     PROGRESS_LOG_INTERVAL, SLOW_EPOCH_THRESHOLD, DEVICE, PARQUET_DATASET, SUBMISSION_DIR
 )
 
@@ -62,6 +96,8 @@ print(f"  LEARNING_RATE: {LEARNING_RATE}")
 print(f"  TRAIN_RESOLUTION: {TRAIN_RESOLUTION}")
 print(f"  EARLY_STOPPING_PATIENCE: {EARLY_STOPPING_PATIENCE}")
 print(f"  FREEZE_BACKBONE_UNTIL_EPOCH: {FREEZE_BACKBONE_UNTIL_EPOCH}")
+print(f"  LABEL_SMOOTHING: {LABEL_SMOOTHING}")
+print(f"  GRADIENT_ACCUMULATION_STEPS: {GRADIENT_ACCUMULATION_STEPS}")
 print(f"{'='*60}\n")
 
 # Custom Dataset for 4-class classification
@@ -69,7 +105,7 @@ class CataractDataset(Dataset):
     def __init__(self, parquet_path, transform=None):
         self.transform = transform
         self.df = pd.read_parquet(parquet_path)
-        # EXACT label mapping (must match actual values in 'label' column with spaces)
+        # EXACT label mapping (canonical form with spaces)
         self.class_to_idx = {
             'No Cataract': 0,
             'Immature Cataract': 1,
@@ -78,14 +114,43 @@ class CataractDataset(Dataset):
         }
         self.idx_to_class = {v: k for k, v in self.class_to_idx.items()}
 
+        # Accept either "label" (our format) or "Cataract Type" (organizer format) with underscore variants
+        candidate_label_cols = [
+            'label', 'Cataract Type', 'cataract type', 'Cataract_Type', 'cataract_type'
+        ]
+        self.label_column = None
+        for col in candidate_label_cols:
+            if col in self.df.columns:
+                self.label_column = col
+                break
+        if self.label_column is None:
+            raise KeyError(
+                "No label column found. Expected one of: "
+                f"{candidate_label_cols}. Found: {list(self.df.columns)}"
+            )
+
+        # Map lowercased/underscore variants to canonical labels
+        self.label_aliases = {
+            'no cataract': 'No Cataract',
+            'no_cataract': 'No Cataract',
+            'immature cataract': 'Immature Cataract',
+            'immature_cataract': 'Immature Cataract',
+            'mature cataract': 'Mature Cataract',
+            'mature_cataract': 'Mature Cataract',
+            'iol inserted': 'IOL Inserted',
+            'iol_inserted': 'IOL Inserted',
+        }
+
     def __len__(self):
         return len(self.df)
 
     def __getitem__(self, idx):
         row = self.df.iloc[idx]
         
-        # Get label from 'label' column (actual column name in parquet)
-        label_str = row['label']
+        # Get label from accepted columns and normalize aliases/underscores
+        raw_label = row[self.label_column]
+        label_key = str(raw_label).replace('_', ' ').strip().lower()
+        label_str = self.label_aliases.get(label_key, str(raw_label))
         
         # Strict label validation (fail fast on unknown labels)
         if label_str not in self.class_to_idx:
@@ -233,7 +298,9 @@ print(f"{'='*60}")
 print(f"Dataset columns: {list(train_df.columns)}")
 print("\nDataset Sanity Check:")
 try:
-    sample_label = train_df['label'].iloc[0]
+    # Use the detected label column from the dataset for validation
+    label_col = train_dataset.dataset.label_column if isinstance(train_dataset, Subset) else train_dataset.label_column
+    sample_label = train_df[label_col].iloc[0]
     # Handle both full dataset and Subset wrapper
     class_to_idx = (
         train_dataset.dataset.class_to_idx 
@@ -328,15 +395,18 @@ device = torch.device(DEVICE)  # From config (default: 'cpu')
 model.to(device)
 
 # Freeze backbone for first N epochs (configurable from config.py)
-# Note: Disabled for now since head is part of backbone - would leave no trainable params
-# if FREEZE_BACKBONE_UNTIL_EPOCH > 0:
-#     print(f"🔒 Freezing backbone for first {FREEZE_BACKBONE_UNTIL_EPOCH} epochs...")
-#     for p in model.backbone.parameters():
-#         p.requires_grad = False
+if FREEZE_BACKBONE_UNTIL_EPOCH > 0:
+    print(f"🔒 Freezing backbone for first {FREEZE_BACKBONE_UNTIL_EPOCH} epochs...")
+    # Freeze all parameters except the classifier head (_fc)
+    for name, param in model.backbone.named_parameters():
+        if '_fc' not in name:
+            param.requires_grad = False
+    print(f"✓ Backbone frozen (except classifier head). Only head trainable.")
+else:
+    print(f"✓ All parameters trainable (no backbone freezing).")
 
 print(f"✓ Model: CataractModel (EfficientNet-B0 backbone)")
 print(f"✓ Device: {device}")
-print(f"✓ All parameters trainable (pretrained EfficientNet-B0)")
 print(f"{'='*60}\n")
 
 # ============ OPTIMIZER & SCHEDULER ============
@@ -350,7 +420,7 @@ print(f"✓ Class weights from config: {CLASS_WEIGHTS}")
 
 # Optimizer with weight decay for regularization
 optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
-criterion = nn.CrossEntropyLoss(weight=config_class_weights)
+criterion = nn.CrossEntropyLoss(weight=config_class_weights, label_smoothing=LABEL_SMOOTHING)
 
 # Learning rate scheduler (reduce LR on plateau with configurable parameters)
 from torch.optim.lr_scheduler import ReduceLROnPlateau
@@ -386,10 +456,22 @@ patience_counter = 0
 
 for epoch in range(num_epochs):
     epoch_start = time.time()
+    
+    # Unfreeze backbone at FREEZE_BACKBONE_UNTIL_EPOCH if enabled
+    if epoch == FREEZE_BACKBONE_UNTIL_EPOCH and FREEZE_BACKBONE_UNTIL_EPOCH > 0:
+        print(f"\n🔓 Unfreezing backbone at epoch {epoch}. Switching to lower LR: {UNFREEZE_LR}")
+        for param in model.backbone.parameters():
+            param.requires_grad = True
+        # Reduce learning rate when unfreezing
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = UNFREEZE_LR
+        print(f"✓ Backbone unfrozen. All parameters now trainable.\n")
+    
     model.train()
     train_loss = 0.0
     train_preds = []
     train_labels_list = []
+    accumulated_loss = 0.0  # For gradient accumulation
 
     # ============ TRAINING PHASE ============
     print(f"\nEpoch {epoch+1}/{num_epochs} - Training...")
@@ -399,16 +481,24 @@ for epoch in range(num_epochs):
     for batch_idx, (images, labels) in enumerate(train_loader):
         batch_start = time.time()
         images, labels = images.to(device), labels.to(device)
-        optimizer.zero_grad()
+        
         outputs = model(images)
         loss = criterion(outputs, labels)
+        # Scale loss by gradient accumulation steps
+        loss = loss / GRADIENT_ACCUMULATION_STEPS
         loss.backward()
-        optimizer.step()
-
+        
+        accumulated_loss += loss.item()
         train_loss += loss.item()
         preds = torch.argmax(outputs, dim=1)
         train_preds.extend(preds.cpu().numpy())
         train_labels_list.extend(labels.cpu().numpy())
+        
+        # Perform optimizer step every GRADIENT_ACCUMULATION_STEPS batches
+        if (batch_idx + 1) % GRADIENT_ACCUMULATION_STEPS == 0:
+            optimizer.step()
+            optimizer.zero_grad()
+            accumulated_loss = 0.0
         
         # Progress update with simple ASCII progress bar
         if (batch_idx + 1) % PROGRESS_LOG_INTERVAL == 0 or (batch_idx + 1) == train_batches:
@@ -419,12 +509,19 @@ for epoch in range(num_epochs):
             bar = '█' * filled + '░' * (bar_width - filled)
             print(f"  [{bar}] {progress_pct:5.1f}% | Batch {batch_idx+1}/{train_batches} | Loss: {loss.item():.4f} | {batch_time:.2f}s")
 
+    # Flush any remaining accumulated gradients
+    if GRADIENT_ACCUMULATION_STEPS > 1:
+        optimizer.step()
+        optimizer.zero_grad()
+
     train_f1 = f1_score(train_labels_list, train_preds, average='macro')
     train_loss /= train_batches
     train_phase_time = time.time() - train_phase_start
     avg_batch_time = sum(batch_times) / len(batch_times) if batch_times else 0
+    effective_batch = BATCH_SIZE * GRADIENT_ACCUMULATION_STEPS
     
     print(f"  ✓ Training complete: {train_phase_time:.1f}s (avg {avg_batch_time:.2f}s/batch)")
+    print(f"  ℹ️  Effective batch size: {effective_batch} (physical: {BATCH_SIZE} x accumulation: {GRADIENT_ACCUMULATION_STEPS})")
 
     # ============ VALIDATION PHASE ============
     print(f"\n{'─'*60}")
@@ -568,3 +665,27 @@ print(f"{'='*60}\n")
 # from utils.log_run import log_run
 # log_run(f"Training completed: Train F1 {train_f1:.4f}, Val F1 {val_f1:.4f}")
 print(f"Logged run outcome at {__import__('datetime').datetime.now()}")
+
+# Save training summary to run folder
+summary_path = os.path.join(run_folder, 'summary.txt')
+with open(summary_path, 'w', encoding='utf-8') as f:
+    f.write(f"Training Run Summary\n")
+    f.write(f"{'='*60}\n")
+    f.write(f"Run Timestamp: {run_timestamp}\n")
+    f.write(f"Best Validation F1: {best_val_f1:.4f}\n")
+    f.write(f"Total Epochs: {num_epochs}\n")
+    f.write(f"Train Resolution: {TRAIN_RESOLUTION}\n")
+    f.write(f"Batch Size: {BATCH_SIZE}\n")
+    f.write(f"Gradient Accumulation Steps: {GRADIENT_ACCUMULATION_STEPS}\n")
+    f.write(f"Effective Batch Size: {BATCH_SIZE * GRADIENT_ACCUMULATION_STEPS}\n")
+    f.write(f"Label Smoothing: {LABEL_SMOOTHING}\n")
+    f.write(f"Freeze Backbone Until Epoch: {FREEZE_BACKBONE_UNTIL_EPOCH}\n")
+    f.write(f"Best Model Path: {BEST_MODEL_PATH}\n")
+    f.write(f"Submission Package: {tar_path}\n")
+    f.write(f"{'='*60}\n")
+
+print(f"\n✓ Training summary saved to: {summary_path}")
+
+# Close logger
+tee_logger.close()
+sys.stdout = tee_logger.terminal

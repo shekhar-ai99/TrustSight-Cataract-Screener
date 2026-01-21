@@ -11,7 +11,7 @@ DEBUG_SUBSAMPLE = False      # Alternative debug mode
 DEBUG_SAMPLE_SIZE = 50       # Only used if DEBUG_SUBSAMPLE=True
 
 # ============ TRAINING HYPERPARAMETERS ============
-NUM_EPOCHS = 20              # Total epochs (will stop early if val_f1 plateaus)
+NUM_EPOCHS = 10              # Total epochs (quick training on merged dataset)
 BATCH_SIZE = 2               # Batch size (keep small for CPU)
 NUM_WORKERS = 0              # DataLoader workers (0=safe for Windows, 1-2=faster on Linux)
 LEARNING_RATE = 1e-4         # Initial learning rate for AdamW
@@ -60,7 +60,14 @@ IMMATURE_GAUSSIAN_BLUR_KERNEL = 3       # Gaussian blur kernel for Immature
 IMMATURE_GAUSSIAN_BLUR_SIGMA = (0.1, 1.0)  # Gaussian blur sigma for Immature
 
 # ============ BACKBONE FREEZING ============
-FREEZE_BACKBONE_UNTIL_EPOCH = 3  # Freeze pretrained weights until this epoch (0-indexed)
+FREEZE_BACKBONE_UNTIL_EPOCH = 15  # Freeze backbone for first 75% of training (~15 epochs out of 20)
+UNFREEZE_LR = 5e-5           # Lower learning rate when unfreezing backbone (default: 5e-5)
+
+# ============ LABEL SMOOTHING ============
+LABEL_SMOOTHING = 0.1        # Label smoothing to reduce overconfidence (0.0 = disabled)
+
+# ============ GRADIENT ACCUMULATION ============
+GRADIENT_ACCUMULATION_STEPS = 4  # Accumulate gradients over this many batches (effective batch = BATCH_SIZE * GRAD_ACC_STEPS)
 
 # ============ CLASS WEIGHTING ============
 CLASS_WEIGHT_POWER = 1.5     # Exponent for class weighting (1.5=aggressive boost for minorities)
@@ -70,7 +77,7 @@ PROGRESS_LOG_INTERVAL = 5    # How often to print batch progress (in batches)
 SLOW_EPOCH_THRESHOLD = 600   # Warn if epoch exceeds this many seconds
 
 # ============ PATHS ============
-PARQUET_DATASET = '../dataset/cataract-training-dataset.parquet'
+PARQUET_DATASET = '../dataset/merged_training_dataset.parquet'
 SUBMISSION_DIR = '../test_submission'
 
 # ============ DEVICE ============

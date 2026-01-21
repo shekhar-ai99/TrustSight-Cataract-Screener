@@ -1,13 +1,27 @@
-import torch
-import numpy as np
-import pandas as pd
 import os
 import pickle
-import zipfile
 import sys
 import types
-from efficientnet_pytorch import EfficientNet
+import zipfile
+
+import numpy as np
+import pandas as pd
+import torch
 import torch.nn as nn
+import torch.nn.functional as F
+from efficientnet_pytorch import EfficientNet
+
+# Enforce deterministic behaviour for evaluator path
+def _set_seed(seed: int = 42):
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    np.random.seed(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    torch.use_deterministic_algorithms(True)
+
+
+_set_seed(42)
 
 _model = None
 CLASS_COUNT = 4
@@ -19,6 +33,30 @@ CLASS_NAMES = [
     "IOL Inserted"
 ]
 
+# Match training resolution (train uses 384x384); evaluator input is 512x512 flattened
+_INFER_RES = 384
+# Optional temperature scaling (default 1.0). If temp.txt exists beside model, use it.
+_DEFAULT_TEMPERATURE = 1.0
+_TEMPERATURE_PATHS = [
+    os.path.join(os.path.dirname(__file__), "temp.txt"),
+    "temp.txt",
+]
+
+
+def _load_temperature() -> float:
+    for path in _TEMPERATURE_PATHS:
+        if os.path.exists(path):
+            try:
+                value = float(open(path, "r", encoding="utf-8").read().strip())
+                if value > 0:
+                    return value
+            except Exception:
+                continue
+    return _DEFAULT_TEMPERATURE
+
+
+_TEMPERATURE = _load_temperature()
+
 class CataractModel(nn.Module):
     def __init__(self):
         super().__init__()
@@ -29,11 +67,12 @@ class CataractModel(nn.Module):
     def forward(self, x):
         return self.backbone(x)
 
-def _enable_mc_dropout(model):
-    """Enable dropout layers during inference."""
+
+def _disable_dropout(model):
+    """Force dropout layers off for deterministic eval."""
     for m in model.modules():
         if m.__class__.__name__.startswith("Dropout"):
-            m.train()
+            m.eval()
 
 
 class _UnpicklerWithClassMap(pickle.Unpickler):
@@ -92,7 +131,7 @@ def _load_model():
                 _model = model_instance
             
             _model.eval()
-            _enable_mc_dropout(_model)
+            _disable_dropout(_model)
         except Exception as e:
             raise RuntimeError(f"Failed to load model.pth: {e}")
 
@@ -141,16 +180,55 @@ def predict(batch):
     batch = torch.from_numpy(batch.astype(np.float32))
     batch = batch.view(-1, 3, 512, 512)
 
+    # Align to training resolution for consistent spatial stats
+    if _INFER_RES != 512:
+        batch = F.interpolate(batch, size=(_INFER_RES, _INFER_RES), mode="bilinear", align_corners=False)
+
+    # Detect pixel scale: if values look like 0-255, scale to [0,1]
+    max_val = batch.max()
+    if max_val > 1.5:
+        batch = batch / 255.0
+
     # Normalize (match training)
     mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
     std = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
     batch = (batch - mean) / std
 
-    # Get class predictions (argmax instead of probabilities)
+    # Get calibrated probabilities (temperature-scaled) and class predictions
     with torch.no_grad():
         logits = _model(batch)
+        if _TEMPERATURE != 1.0:
+            logits = logits / _TEMPERATURE
+        # Slight positive bias to cataract classes (indices 1,2,3) to favor sensitivity
+        bias = torch.zeros_like(logits)
+        bias[:, 1:] += 0.05
+        logits = logits + bias
+        probs = torch.softmax(logits, dim=1)
+
+    # Confidence-aware prediction with class-specific thresholds
+    probs_np = probs.cpu().numpy()
+    class_indices = []
     
-    class_indices = torch.argmax(logits, dim=1).cpu().numpy()
+    for i in range(probs_np.shape[0]):
+        prob_sample = probs_np[i]
+        max_prob = prob_sample.max()
+        pred_idx = prob_sample.argmax()
+        
+        # Class-specific confidence thresholds to reduce overconfident errors
+        # IOL Inserted (idx=3) has lower threshold due to class imbalance
+        if pred_idx == 3 and prob_sample[3] < 0.35:
+            # Fallback to second-best prediction for low-confidence IOL
+            prob_sample_copy = prob_sample.copy()
+            prob_sample_copy[3] = 0
+            pred_idx = prob_sample_copy.argmax()
+        elif max_prob < 0.40:
+            # For very low confidence across all classes, prefer No Cataract (idx=0)
+            # as the conservative screening default
+            pred_idx = 0
+        
+        class_indices.append(pred_idx)
+    
+    class_indices = np.array(class_indices)
 
     # Map indices to class label strings
     labels = np.array([CLASS_NAMES[i] for i in class_indices])

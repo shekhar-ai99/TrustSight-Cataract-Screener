@@ -97,41 +97,20 @@ def _load_model():
     if _model is None:
         try:
             # Try to load from multiple possible locations
-            # 1. Relative to this file's directory (for extracted submission)
             model_path = os.path.join(os.path.dirname(__file__), "..", "model.pth")
-            
-            # 2. Current working directory (fallback)
             if not os.path.exists(model_path):
                 model_path = "model.pth"
-            
-            # Load model using torch.load
-            # If it fails due to missing 'model' module, create an empty module
-            try:
-                _model = torch.load(model_path, map_location="cpu")
-            except ModuleNotFoundError as e:
-                if 'model' in str(e):
-                    # Create a fake 'model' module in sys.modules to help unpickling
-                    import sys
-                    import types
-                    
-                    # Create fake module
-                    fake_model_module = types.ModuleType('model')
-                    fake_model_module.CataractModel = CataractModel
-                    sys.modules['model'] = fake_model_module
-                    
-                    # Try again
-                    _model = torch.load(model_path, map_location="cpu")
-                else:
-                    raise
-            
-            # If loaded object is a state_dict (dict), create model and load state
-            if isinstance(_model, dict):
-                model_instance = CataractModel()
-                model_instance.load_state_dict(_model, strict=False)
-                _model = model_instance
-            
-            _model.eval()
-            _disable_dropout(_model)
+
+            # Expect a state_dict (safe for PyTorch >=2.6 evaluators)
+            state = torch.load(model_path, map_location="cpu")
+            if not isinstance(state, dict):
+                raise RuntimeError(f"Expected state_dict, got {type(state)}")
+
+            model_instance = CataractModel()
+            model_instance.load_state_dict(state, strict=False)
+            model_instance.eval()
+            _disable_dropout(model_instance)
+            _model = model_instance
         except Exception as e:
             raise RuntimeError(f"Failed to load model.pth: {e}")
 

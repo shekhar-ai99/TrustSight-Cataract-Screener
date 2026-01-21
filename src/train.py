@@ -609,7 +609,8 @@ print("="*60)
 
 # CRITICAL: Load best model before packaging (not last epoch)
 print("Loading BEST model for submission...")
-model.load_state_dict(torch.load(BEST_MODEL_PATH, map_location=device))
+best_state_dict = torch.load(BEST_MODEL_PATH, map_location=device)
+model.load_state_dict(best_state_dict)
 print(f"✓ Loaded best model (Val F1: {best_val_f1:.4f}) from {BEST_MODEL_PATH}\n")
 
 ist = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
@@ -620,7 +621,7 @@ root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), SUBMISSION_DI
 folder_path = os.path.join(root_dir, folder_name)
 os.makedirs(folder_path, exist_ok=True)
 model_path = os.path.join(folder_path, 'model.pth')
-torch.save(model, model_path)
+torch.save(model.state_dict(), model_path)
 print(f'✓ Best model saved as {model_path}')
 # Copy fixed files to folder for tar.gz
 import shutil
@@ -644,7 +645,7 @@ with tarfile.open(tar_path, "w:gz") as tar:
 print(f'✓ Tar.gz created as {tar_path}')
 # Also save in root for submission
 root_model_path = os.path.join(root_dir, 'model.pth')
-torch.save(model, root_model_path)
+torch.save(model.state_dict(), root_model_path)
 print(f'✓ Model also saved as {root_model_path}')
 print("="*60)
 print("Training complete!")

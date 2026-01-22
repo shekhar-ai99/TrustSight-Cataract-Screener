@@ -2,42 +2,47 @@ import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from efficientnet_pytorch import EfficientNet
+import torchvision.models as models
 
 
 class CataractModel(nn.Module):
-    def __init__(self, weights_path: str | None = None):
+    def __init__(self, weights_path: str | None = None, backbone: str = "resnet18"):
         super().__init__()
-        # Prefer local weights; avoid internet calls in all cases
-        if weights_path and os.path.exists(weights_path):
-            self.backbone = EfficientNet.from_pretrained(
-                "efficientnet-b0",
-                advprop=False
-            )
-            state = torch.load(weights_path, map_location="cpu")
-            self.backbone.load_state_dict(state)
+        # Load ResNet18 (rank #1 on leaderboard uses this)
+        if backbone == "resnet18":
+            try:
+                # Try to load with pretrained weights
+                self.backbone = models.resnet18(weights=models.ResNet18_Weights.DEFAULT)
+            except Exception as e:
+                # Fallback to random initialization if download fails
+                print(f"Warning: Could not load pretrained ResNet18 weights ({e}). Using random init.")
+                self.backbone = models.resnet18(weights=None)
+            
+            # Replace final FC layer for 4-class classification
+            in_features = self.backbone.fc.in_features
+            self.backbone.fc = nn.Linear(in_features, 4)
         else:
-            # Load pretrained EfficientNet-B0 for better initialization
-            self.backbone = EfficientNet.from_pretrained(
-                "efficientnet-b0",
-                advprop=False
-            )
-
-        in_features = getattr(self.backbone._fc, "in_features", None)
-        if in_features is None:
+            # Fallback to EfficientNet-B0 if specified
+            from efficientnet_pytorch import EfficientNet
+            self.backbone = EfficientNet.from_pretrained("efficientnet-b0", advprop=False)
             in_features = self.backbone._fc.weight.shape[1]
-        self.backbone._fc = nn.Linear(in_features, 4)
+            self.backbone._fc = nn.Linear(in_features, 4)
+        
+        # Load custom weights if provided
+        if weights_path and os.path.exists(weights_path):
+            state = torch.load(weights_path, map_location="cpu")
+            self.backbone.load_state_dict(state, strict=False)
 
     def forward(self, x, mc: bool = False):
-        # Default behavior: just run backbone. MC behavior is handled by safe_mc_forward
-        out = self.backbone(x)
-        return out
+        """Forward pass through ResNet18 backbone."""
+        if mc:
+            # MC Dropout mode: enable dropout
+            self.train()
+            return self.backbone(x)
+        else:
+            # Deterministic mode: standard forward
+            return self.backbone(x)
 
-    def enable_mc_dropout(self):
-        """Force all dropout modules to train mode so they stay active during inference."""
-        for m in self.modules():
-            if isinstance(m, nn.Dropout):
-                m.train()
 
     def disable_mc_dropout(self):
         """Ensure dropout modules are in eval mode."""

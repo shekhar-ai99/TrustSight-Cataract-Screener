@@ -14,7 +14,7 @@ import sys
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import Dataset, DataLoader, Subset
+from torch.utils.data import Dataset, DataLoader, Subset, WeightedRandomSampler
 import torchvision.transforms as transforms
 from PIL import Image
 import numpy as np
@@ -24,8 +24,14 @@ from albumentations.pytorch import ToTensorV2
 import ast
 from collections import Counter
 from sklearn.metrics import f1_score
+from sklearn.model_selection import train_test_split
 import datetime
 import time
+
+# Focal Loss
+from focal_loss import FocalLoss
+# MixUp Augmentation
+from mixup import mixup, mixup_criterion, should_skip_mixup
 
 # Setup logging to file
 class TeeLogger:
@@ -77,12 +83,12 @@ from config import (
     IMMATURE_EXTRA_AUG, IMMATURE_COLOR_JITTER_BRIGHTNESS, IMMATURE_COLOR_JITTER_CONTRAST,
     IMMATURE_GAUSSIAN_BLUR_KERNEL, IMMATURE_GAUSSIAN_BLUR_SIGMA,
     CLASS_WEIGHTS, FREEZE_BACKBONE_UNTIL_EPOCH, UNFREEZE_LR, CLASS_WEIGHT_POWER,
-    LABEL_SMOOTHING, GRADIENT_ACCUMULATION_STEPS,
+    LABEL_SMOOTHING, GRADIENT_ACCUMULATION_STEPS, RANDOM_SEED,
     PROGRESS_LOG_INTERVAL, SLOW_EPOCH_THRESHOLD, DEVICE, PARQUET_DATASET, SUBMISSION_DIR
 )
 
 # Set seed for reproducibility
-set_seed(42)
+set_seed(RANDOM_SEED)
 
 # ============ CONFIG LOADED FROM config.py ============
 # All configuration is now centralized in config.py for easy modification
@@ -102,8 +108,9 @@ print(f"{'='*60}\n")
 
 # Custom Dataset for 4-class classification
 class CataractDataset(Dataset):
-    def __init__(self, parquet_path, transform=None):
+    def __init__(self, parquet_path, transform=None, is_train=True):
         self.transform = transform
+        self.is_train = is_train  # FIX-4: Track whether this is training or validation
         self.df = pd.read_parquet(parquet_path)
         # EXACT label mapping (canonical form with spaces)
         self.class_to_idx = {
@@ -193,9 +200,9 @@ class CataractDataset(Dataset):
             # Convert to float and apply ImageNet normalization
             image = image.float() if image.dtype != torch.float32 else image
             
-            # CLASS-SPECIFIC AUGMENTATION: Extra augmentation for Immature Cataract (label=1)
-            # Reduces No ↔ Immature confusion by adding controlled noise
-            if IMMATURE_EXTRA_AUG and label == 1:
+            # FIX-4: CLASS-SPECIFIC AUGMENTATION ONLY DURING TRAINING
+            # Extra augmentation for Immature Cataract (label=1) - reduces No ↔ Immature confusion
+            if self.is_train and IMMATURE_EXTRA_AUG and label == 1:
                 # Apply ColorJitter (convert tensor back to PIL temporarily)
                 pil_img = transforms.ToPILImage()(image)
                 pil_img = transforms.ColorJitter(
@@ -254,19 +261,26 @@ val_transform = A.Compose([
 # Load datasets from parquet file (from config)
 parquet_path = os.path.abspath(os.path.join(os.path.dirname(__file__), PARQUET_DATASET))
 
-# FIX DATA LEAKAGE: Split parquet into proper train/val (80/20)
+# FIX-1: STRATIFIED TRAIN/VAL SPLIT - Ensure IOL class represented proportionally
 print("Loading and splitting dataset...")
 df_full = pd.read_parquet(parquet_path)
-train_df = df_full.sample(frac=0.8, random_state=42)
-val_df = df_full.drop(train_df.index)
+
+# Use stratified split to ensure minority classes (IOL) appear in validation
+train_df, val_df = train_test_split(
+    df_full,
+    test_size=0.2,
+    random_state=42,
+    stratify=df_full['label']  # Stratify on label column
+)
 
 # Reset indices for clean iteration
 train_df = train_df.reset_index(drop=True)
 val_df = val_df.reset_index(drop=True)
+print(f"✓ Stratified split applied (random_state=42, stratify on label)")
 
 # Create datasets with split dataframes
-train_dataset = CataractDataset(parquet_path, transform=train_transform)
-val_dataset = CataractDataset(parquet_path, transform=val_transform)
+train_dataset = CataractDataset(parquet_path, transform=train_transform, is_train=True)
+val_dataset = CataractDataset(parquet_path, transform=val_transform, is_train=False)
 train_dataset.df = train_df
 val_dataset.df = val_df
 
@@ -363,11 +377,31 @@ print(f"{'='*60}\n")
 print(f"{'='*60}")
 print("INITIALIZING DATA LOADERS")
 print(f"{'='*60}")
+
+# FIX-5: WEIGHTED SAMPLER TO ENSURE IOL EXPOSURE IN EVERY BATCH
+# Create sample weights inversely proportional to class frequency
+if isinstance(train_dataset, Subset):
+    train_labels = [int(train_dataset.dataset[i][1].item()) for i in train_dataset.indices]
+else:
+    train_labels = [int(label.item()) for _, label in train_dataset]
+
+class_counts = np.bincount(train_labels, minlength=4)
+weights_per_class = 1.0 / (class_counts + 1e-6)
+sample_weights = np.array([weights_per_class[label] for label in train_labels])
+sample_weights = sample_weights / sample_weights.sum()  # Normalize
+
+sampler = WeightedRandomSampler(
+    weights=sample_weights,
+    num_samples=len(sample_weights),
+    replacement=True
+)
+print(f"✓ FIX-5: WeightedRandomSampler applied to balance class exposure per batch")
+
 # Use batch size and workers from config
 train_loader = DataLoader(
     train_dataset, 
     batch_size=BATCH_SIZE, 
-    shuffle=True, 
+    sampler=sampler,  # Use weighted sampler instead of shuffle
     num_workers=NUM_WORKERS,
     pin_memory=False  # Explicit: no benefit for CPU training
 )
@@ -399,7 +433,7 @@ if FREEZE_BACKBONE_UNTIL_EPOCH > 0:
     print(f"🔒 Freezing backbone for first {FREEZE_BACKBONE_UNTIL_EPOCH} epochs...")
     # Freeze all parameters except the classifier head (_fc)
     for name, param in model.backbone.named_parameters():
-        if '_fc' not in name:
+        if '_fc' not in name and 'fc' not in name:
             param.requires_grad = False
     print(f"✓ Backbone frozen (except classifier head). Only head trainable.")
 else:
@@ -407,6 +441,18 @@ else:
 
 print(f"✓ Model: CataractModel (EfficientNet-B0 backbone)")
 print(f"✓ Device: {device}")
+
+# DEBUG: Check trainable parameters
+trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+frozen_params = sum(p.numel() for p in model.parameters() if not p.requires_grad)
+print(f"✓ Trainable parameters: {trainable_params:,}")
+print(f"✓ Frozen parameters: {frozen_params:,}")
+
+# DEBUG: Print FC layer status
+for name, param in model.backbone.named_parameters():
+    if 'fc' in name:
+        print(f"  FC param '{name}': requires_grad={param.requires_grad}")
+
 print(f"{'='*60}\n")
 
 # ============ OPTIMIZER & SCHEDULER ============
@@ -414,13 +460,17 @@ print(f"{'='*60}")
 print("CONFIGURING OPTIMIZER & SCHEDULER")
 print(f"{'='*60}")
 
-# Use class weights from config for imbalance handling
-config_class_weights = torch.tensor(CLASS_WEIGHTS, dtype=torch.float32).to(device)
-print(f"✓ Class weights from config: {CLASS_WEIGHTS}")
+# FIX-2: USE COMPUTED INVERSE-FREQUENCY WEIGHTS (not hard-coded config weights)
+# Computed weights are already calculated above; convert to device
+computed_class_weights = class_weights.to(device)
+print(f"✓ Class weights (inverse frequency): {computed_class_weights.cpu().numpy()}")
+print(f"  [No Cataract, Immature, Mature, IOL] with CLASS_WEIGHT_POWER={CLASS_WEIGHT_POWER}")
 
 # Optimizer with weight decay for regularization
 optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
-criterion = nn.CrossEntropyLoss(weight=config_class_weights, label_smoothing=LABEL_SMOOTHING)
+
+# Focal Loss with COMPUTED weights (not config weights) and FIX-8: label smoothing
+criterion = FocalLoss(alpha=computed_class_weights, gamma=2.0, label_smoothing=LABEL_SMOOTHING, reduction='mean')
 
 # Learning rate scheduler (reduce LR on plateau with configurable parameters)
 from torch.optim.lr_scheduler import ReduceLROnPlateau
@@ -432,7 +482,7 @@ scheduler = ReduceLROnPlateau(
     verbose=True
 )
 print(f"✓ Optimizer: AdamW (lr={LEARNING_RATE}, weight_decay={WEIGHT_DECAY})")
-print(f"✓ Loss: CrossEntropyLoss (class-weighted: {CLASS_WEIGHTS})")
+print(f"✓ Loss: Focal Loss (gamma=2.0, label_smoothing={LABEL_SMOOTHING}, class-weighted)")
 print(f"✓ Scheduler: ReduceLROnPlateau (factor={SCHEDULER_FACTOR}, patience={SCHEDULER_PATIENCE})")
 print(f"{'='*60}\n")
 
@@ -456,6 +506,13 @@ patience_counter = 0
 
 for epoch in range(num_epochs):
     epoch_start = time.time()
+    
+    # DEBUG: On first epoch, check if model has trainable parameters
+    if epoch == 0:
+        trainable_params = [p for p in model.parameters() if p.requires_grad]
+        if not trainable_params:
+            raise RuntimeError("ERROR: No trainable parameters in model! Check parameter freezing.")
+        print(f"\nDEBUG: Found {len(trainable_params)} trainable parameter tensors")
     
     # Unfreeze backbone at FREEZE_BACKBONE_UNTIL_EPOCH if enabled
     if epoch == FREEZE_BACKBONE_UNTIL_EPOCH and FREEZE_BACKBONE_UNTIL_EPOCH > 0:
@@ -482,11 +539,51 @@ for epoch in range(num_epochs):
         batch_start = time.time()
         images, labels = images.to(device), labels.to(device)
         
+        # Forward pass
         outputs = model(images)
-        loss = criterion(outputs, labels)
+        
+        # Safety check
+        if outputs is None:
+            raise RuntimeError(f"Model forward pass returned None. Check model.py forward() method.")
+        
+        # DEBUG: Check output properties
+        if batch_idx == 0 and epoch == 0:
+            print(f"\nDEBUG - Outputs properties:")
+            print(f"  outputs shape: {outputs.shape}")
+            print(f"  outputs.requires_grad: {outputs.requires_grad}")
+            print(f"  outputs.grad_fn: {outputs.grad_fn}")
+            print(f"  outputs dtype: {outputs.dtype}")
+            print(f"  labels: {labels}")
+            print(f"  labels dtype: {labels.dtype}")
+            print(f"  Model training: {model.training}\n")
+        
+        # FIX-7: Apply MixUp augmentation (50% chance per batch) - BUT SKIP IF BATCH CONTAINS IOL
+        if np.random.rand() < 0.5 and not should_skip_mixup(labels):
+            images_mixed, labels_a, labels_b, lam = mixup(images, labels, alpha=0.2)
+            outputs_mixed = model(images_mixed)
+            loss = mixup_criterion(criterion, outputs_mixed, labels_a, labels_b, lam)
+        else:
+            loss = criterion(outputs, labels)
+        
         # Scale loss by gradient accumulation steps
         loss = loss / GRADIENT_ACCUMULATION_STEPS
+        
+        # DEBUG: Check loss properties
+        if batch_idx == 0 and epoch == 0:
+            print(f"\nDEBUG - Loss tensor properties BEFORE backward:")
+            print(f"  loss value: {loss.item() if loss.requires_grad else 'scalar'}")
+            print(f"  loss.requires_grad: {loss.requires_grad}")
+            print(f"  loss.grad_fn: {loss.grad_fn}")
+            print(f"  loss dtype: {loss.dtype}")
+            if loss.grad_fn:
+                print(f"  loss.grad_fn.next_functions: {loss.grad_fn.next_functions}\n")
+            else:
+                print(f"  WARNING: loss has no grad_fn!\n")
+        
         loss.backward()
+        
+        # FIX-9: Add gradient clipping to prevent exploding gradients
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         
         accumulated_loss += loss.item()
         train_loss += loss.item()

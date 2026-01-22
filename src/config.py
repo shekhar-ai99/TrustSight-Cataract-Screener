@@ -11,7 +11,7 @@ DEBUG_SUBSAMPLE = False      # Alternative debug mode
 DEBUG_SAMPLE_SIZE = 50       # Only used if DEBUG_SUBSAMPLE=True
 
 # ============ TRAINING HYPERPARAMETERS ============
-NUM_EPOCHS = 10              # Total epochs (quick training on merged dataset)
+NUM_EPOCHS = 10              # Reduced for faster training (was 20)
 BATCH_SIZE = 2               # Batch size (keep small for CPU)
 NUM_WORKERS = 0              # DataLoader workers (0=safe for Windows, 1-2=faster on Linux)
 LEARNING_RATE = 1e-4         # Initial learning rate for AdamW
@@ -31,9 +31,9 @@ SCHEDULER_FACTOR = 0.5       # Multiply LR by this when plateau detected
 SCHEDULER_PATIENCE = 3       # Epochs without improvement before reducing LR
 
 # ============ RESOLUTION ============
-TRAIN_RESOLUTION = 384       # Training image resolution (faster than 512)
-VAL_RESOLUTION = 384         # Validation image resolution
-INFERENCE_RESOLUTION = 512   # Inference stays 512×512 (no contract violation)
+TRAIN_RESOLUTION = 512       # FIX-3: Train at 512 to match inference resolution
+VAL_RESOLUTION = 512         # Match training resolution
+INFERENCE_RESOLUTION = 512   # Inference stays 512×512 (consistent with training)
 
 # ============ AUGMENTATION PARAMETERS ============
 AUGMENTATION_BRIGHTNESS = 0.4      # RandomBrightnessContrast range
@@ -60,8 +60,8 @@ IMMATURE_GAUSSIAN_BLUR_KERNEL = 3       # Gaussian blur kernel for Immature
 IMMATURE_GAUSSIAN_BLUR_SIGMA = (0.1, 1.0)  # Gaussian blur sigma for Immature
 
 # ============ BACKBONE FREEZING ============
-FREEZE_BACKBONE_UNTIL_EPOCH = 15  # Freeze backbone for first 75% of training (~15 epochs out of 20)
-UNFREEZE_LR = 5e-5           # Lower learning rate when unfreezing backbone (default: 5e-5)
+FREEZE_BACKBONE_UNTIL_EPOCH = 5   # Unfreeze earlier for 10 epochs (50%)
+UNFREEZE_LR = 5e-6           # FIX-6: Increased reduction from 5e-5 to 5e-6 (20x reduction from 1e-4)
 
 # ============ LABEL SMOOTHING ============
 LABEL_SMOOTHING = 0.1        # Label smoothing to reduce overconfidence (0.0 = disabled)
@@ -84,6 +84,7 @@ SUBMISSION_DIR = '../test_submission'
 DEVICE = 'cpu'  # 'cpu' or 'cuda' (force CPU for safety)
 
 # ============ MODEL ARCHITECTURE ============
-BACKBONE_MODEL = 'efficientnet-b0'  # EfficientNet variant
+RANDOM_SEED = 42  # For ensemble diversity
+BACKBONE_MODEL = 'resnet18'  # ResNet18 (rank #1 on leaderboard uses this)
 NUM_CLASSES = 4  # Cataract classification: 4 classes
 PRETRAINED = True  # Use pretrained ImageNet weights

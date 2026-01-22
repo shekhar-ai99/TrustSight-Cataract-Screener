@@ -42,6 +42,19 @@ _TEMPERATURE_PATHS = [
     "temp.txt",
 ]
 
+# Per-class confidence thresholds (tunable for each class)
+# Format: {class_idx: threshold}
+# If pred_prob[class_idx] < threshold, fallback to second-best
+_CLASS_THRESHOLDS = {
+    0: 0.40,  # No Cataract
+    1: 0.45,  # Immature Cataract
+    2: 0.40,  # Mature Cataract
+    3: 0.60,  # IOL Inserted (high threshold due to class imbalance)
+}
+
+# Global fallback confidence threshold
+_GLOBAL_THRESHOLD = 0.40
+
 
 def _load_temperature() -> float:
     for path in _TEMPERATURE_PATHS:
@@ -115,6 +128,72 @@ def _load_model():
             raise RuntimeError(f"Failed to load model.pth: {e}")
 
 
+def _apply_tta(batch_tensor):
+    """
+    Test-Time Augmentation: apply multiple transformations and average predictions.
+    
+    Augmentations: original, horizontal flip, vertical flip, horizontal+vertical flip
+    
+    Args:
+        batch_tensor: Preprocessed tensor of shape (N, 3, H, W)
+    
+    Returns:
+        Ensemble softmax probabilities from all augmentations
+    """
+    augmented_probs = []
+    
+    # Original
+    with torch.no_grad():
+        logits = _model(batch_tensor)
+        if _TEMPERATURE != 1.0:
+            logits = logits / _TEMPERATURE
+        bias = torch.zeros_like(logits)
+        bias[:, 1:] += 0.05
+        logits = logits + bias
+        probs = torch.softmax(logits, dim=1)
+        augmented_probs.append(probs)
+    
+    # Horizontal flip
+    batch_h_flip = torch.flip(batch_tensor, dims=[3])
+    with torch.no_grad():
+        logits = _model(batch_h_flip)
+        if _TEMPERATURE != 1.0:
+            logits = logits / _TEMPERATURE
+        bias = torch.zeros_like(logits)
+        bias[:, 1:] += 0.05
+        logits = logits + bias
+        probs = torch.softmax(logits, dim=1)
+        augmented_probs.append(probs)
+    
+    # Vertical flip
+    batch_v_flip = torch.flip(batch_tensor, dims=[2])
+    with torch.no_grad():
+        logits = _model(batch_v_flip)
+        if _TEMPERATURE != 1.0:
+            logits = logits / _TEMPERATURE
+        bias = torch.zeros_like(logits)
+        bias[:, 1:] += 0.05
+        logits = logits + bias
+        probs = torch.softmax(logits, dim=1)
+        augmented_probs.append(probs)
+    
+    # Horizontal + Vertical flip
+    batch_hv_flip = torch.flip(batch_tensor, dims=[2, 3])
+    with torch.no_grad():
+        logits = _model(batch_hv_flip)
+        if _TEMPERATURE != 1.0:
+            logits = logits / _TEMPERATURE
+        bias = torch.zeros_like(logits)
+        bias[:, 1:] += 0.05
+        logits = logits + bias
+        probs = torch.softmax(logits, dim=1)
+        augmented_probs.append(probs)
+    
+    # Average all augmented predictions
+    ensemble_probs = torch.stack(augmented_probs, dim=0).mean(dim=0)
+    return ensemble_probs
+
+
 def predict(batch):
     """
     Input:
@@ -132,7 +211,16 @@ def predict(batch):
         if "image_vector" not in batch.columns:
             raise ValueError("DataFrame must contain 'image_vector' column")
         vectors = batch["image_vector"].tolist()
-        batch = np.array(vectors, dtype=np.float32)
+        # Parse comma-separated strings if needed
+        parsed_vectors = []
+        for v in vectors:
+            if isinstance(v, str):
+                # Parse comma-separated string to float array
+                v = np.fromstring(v, sep=',', dtype=np.float32)
+            else:
+                v = np.array(v, dtype=np.float32)
+            parsed_vectors.append(v)
+        batch = np.array(parsed_vectors, dtype=np.float32)
 
     # --- Case 2: Raw array / tensor fallback ---
     if isinstance(batch, torch.Tensor):
@@ -173,18 +261,8 @@ def predict(batch):
     std = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
     batch = (batch - mean) / std
 
-    # Get calibrated probabilities (temperature-scaled) and class predictions
-    with torch.no_grad():
-        logits = _model(batch)
-        if _TEMPERATURE != 1.0:
-            logits = logits / _TEMPERATURE
-        # Slight positive bias to cataract classes (indices 1,2,3) to favor sensitivity
-        bias = torch.zeros_like(logits)
-        bias[:, 1:] += 0.05
-        logits = logits + bias
-        probs = torch.softmax(logits, dim=1)
-
-    # Confidence-aware prediction with class-specific thresholds
+    # Test-Time Augmentation: ensemble across 4 flipped variants
+    probs = _apply_tta(batch)
     probs_np = probs.cpu().numpy()
     class_indices = []
     
@@ -193,16 +271,16 @@ def predict(batch):
         max_prob = prob_sample.max()
         pred_idx = prob_sample.argmax()
         
-        # Class-specific confidence thresholds to reduce overconfident errors
-        # IOL Inserted (idx=3) has lower threshold due to class imbalance
-        if pred_idx == 3 and prob_sample[3] < 0.35:
-            # Fallback to second-best prediction for low-confidence IOL
+        # Apply per-class threshold
+        class_threshold = _CLASS_THRESHOLDS.get(pred_idx, _GLOBAL_THRESHOLD)
+        if prob_sample[pred_idx] < class_threshold:
+            # Fallback to second-best prediction if below threshold
             prob_sample_copy = prob_sample.copy()
-            prob_sample_copy[3] = 0
+            prob_sample_copy[pred_idx] = 0
             pred_idx = prob_sample_copy.argmax()
-        elif max_prob < 0.40:
-            # For very low confidence across all classes, prefer No Cataract (idx=0)
-            # as the conservative screening default
+        
+        # Global confidence fallback: very low confidence → default to No Cataract
+        if max_prob < _GLOBAL_THRESHOLD:
             pred_idx = 0
         
         class_indices.append(pred_idx)

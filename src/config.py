@@ -11,7 +11,7 @@ DEBUG_SUBSAMPLE = False      # Alternative debug mode
 DEBUG_SAMPLE_SIZE = 50       # Only used if DEBUG_SUBSAMPLE=True
 
 # ============ TRAINING HYPERPARAMETERS ============
-NUM_EPOCHS = 10              # Reduced for faster training (was 20)
+NUM_EPOCHS = 20              # Reduced for faster training (was 20)
 BATCH_SIZE = 2               # Batch size (keep small for CPU)
 NUM_WORKERS = 0              # DataLoader workers (0=safe for Windows, 1-2=faster on Linux)
 LEARNING_RATE = 1e-4         # Initial learning rate for AdamW
@@ -60,24 +60,32 @@ IMMATURE_GAUSSIAN_BLUR_KERNEL = 3       # Gaussian blur kernel for Immature
 IMMATURE_GAUSSIAN_BLUR_SIGMA = (0.1, 1.0)  # Gaussian blur sigma for Immature
 
 # ============ BACKBONE FREEZING ============
-FREEZE_BACKBONE_UNTIL_EPOCH = 5   # Unfreeze earlier for 10 epochs (50%)
-UNFREEZE_LR = 5e-6           # FIX-6: Increased reduction from 5e-5 to 5e-6 (20x reduction from 1e-4)
+FREEZE_BACKBONE_UNTIL_EPOCH = 5   # Unfreeze backbone at epoch 5 (not later - head collapses by epoch 10)
+UNFREEZE_LR = 5e-6           # When unfreezing, use 20x reduction from initial LR
 
 # ============ LABEL SMOOTHING ============
-LABEL_SMOOTHING = 0.1        # Label smoothing to reduce overconfidence (0.0 = disabled)
+LABEL_SMOOTHING = 0.05       # Mild label smoothing with CrossEntropyLoss (reduced from Focal config)
 
 # ============ GRADIENT ACCUMULATION ============
 GRADIENT_ACCUMULATION_STEPS = 4  # Accumulate gradients over this many batches (effective batch = BATCH_SIZE * GRAD_ACC_STEPS)
 
 # ============ CLASS WEIGHTING ============
-CLASS_WEIGHT_POWER = 1.5     # Exponent for class weighting (1.5=aggressive boost for minorities)
+CLASS_WEIGHT_POWER = 1.0     # Exponent for class weighting (1.0=inverse frequency only, no aggressive boost)
+CLASS_WEIGHT_MIN = 0.75      # CLAMP: Minimum class weight to prevent gradient starvation on No/Mature
+CLASS_WEIGHT_MAX = 1.5       # CLAMP: Maximum class weight to prevent rare-class overfitting
+
+# ============ MIXUP AUGMENTATION ============
+MIXUP_PROB = 0.0             # DISABLED - Causes gradient starvation with Focal. Re-enable at macro-F1 > 0.75
+
+# ============ IOL SAMPLING ============
+IOL_SAMPLING_FRACTION = 0.33 # Include IOL 1 every ~3 batches instead of every batch (reduce pressure)
 
 # ============ LOGGING ============
 PROGRESS_LOG_INTERVAL = 5    # How often to print batch progress (in batches)
 SLOW_EPOCH_THRESHOLD = 600   # Warn if epoch exceeds this many seconds
 
 # ============ PATHS ============
-PARQUET_DATASET = '../dataset/merged_training_dataset.parquet'
+PARQUET_DATASET = '../dataset/cataract-training-dataset.parquet'
 SUBMISSION_DIR = '../test_submission'
 
 # ============ DEVICE ============
@@ -85,6 +93,6 @@ DEVICE = 'cpu'  # 'cpu' or 'cuda' (force CPU for safety)
 
 # ============ MODEL ARCHITECTURE ============
 RANDOM_SEED = 42  # For ensemble diversity
-BACKBONE_MODEL = 'resnet18'  # ResNet18 (rank #1 on leaderboard uses this)
+BACKBONE_MODEL = 'efficientnet_b0'  # EfficientNet-B0 (original tested backbone)
 NUM_CLASSES = 4  # Cataract classification: 4 classes
 PRETRAINED = True  # Use pretrained ImageNet weights

@@ -24,11 +24,10 @@ from config import (
     TRAIN_RESOLUTION, VAL_RESOLUTION, DEVICE, PARQUET_DATASET,
     CLASS_WEIGHTS, FREEZE_BACKBONE_UNTIL_EPOCH, UNFREEZE_LR,
     LABEL_SMOOTHING, GRADIENT_ACCUMULATION_STEPS,
-    SCHEDULER_FACTOR, SCHEDULER_PATIENCE
+    SCHEDULER_FACTOR, SCHEDULER_PATIENCE, CLASS_WEIGHT_MIN, CLASS_WEIGHT_MAX, CLASS_WEIGHT_POWER
 )
 from model import CataractModel
 from train import CataractDataset, get_train_transforms, get_val_transforms, set_seed
-from focal_loss import FocalLoss
 
 set_seed(42)
 
@@ -80,8 +79,25 @@ def run_kfold(n_splits=5):
         
         # Model
         model = CataractModel().to(DEVICE)
-        config_class_weights = torch.tensor(CLASS_WEIGHTS, dtype=torch.float32).to(DEVICE)
-        criterion = FocalLoss(alpha=config_class_weights, gamma=2.0, reduction='mean')
+        
+        # Compute class weights with clamping (same as train.py FIX-2)
+        train_labels_raw = [df_full.iloc[i][label_col] for i in train_idx]
+        # Convert to indices if they're strings
+        try:
+            train_labels = [class_to_idx[label] if isinstance(label, str) else int(label) for label in train_labels_raw]
+        except (KeyError, ValueError):
+            train_labels = [int(label) for label in train_labels_raw]
+        
+        label_counts = np.bincount(train_labels, minlength=4)
+        weights = 1.0 / (label_counts + 1e-6)
+        weights = weights ** CLASS_WEIGHT_POWER
+        weights = weights / weights.sum() * 4
+        weights = np.clip(weights, CLASS_WEIGHT_MIN, CLASS_WEIGHT_MAX)
+        weights = weights / weights.sum() * 4
+        class_weights_computed = torch.tensor(weights, dtype=torch.float32).to(DEVICE)
+        
+        # Use CrossEntropyLoss instead of FocalLoss
+        criterion = nn.CrossEntropyLoss(weight=class_weights_computed, label_smoothing=LABEL_SMOOTHING)
         optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
         
         from torch.optim.lr_scheduler import ReduceLROnPlateau

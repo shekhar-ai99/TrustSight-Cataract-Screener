@@ -28,8 +28,8 @@ from sklearn.model_selection import train_test_split
 import datetime
 import time
 
-# Focal Loss
-from focal_loss import FocalLoss
+# Focal Loss - REMOVED (see train.py line 472: using CrossEntropyLoss instead)
+
 # MixUp Augmentation
 from mixup import mixup, mixup_criterion, should_skip_mixup
 
@@ -84,7 +84,8 @@ from config import (
     IMMATURE_GAUSSIAN_BLUR_KERNEL, IMMATURE_GAUSSIAN_BLUR_SIGMA,
     CLASS_WEIGHTS, FREEZE_BACKBONE_UNTIL_EPOCH, UNFREEZE_LR, CLASS_WEIGHT_POWER,
     LABEL_SMOOTHING, GRADIENT_ACCUMULATION_STEPS, RANDOM_SEED,
-    PROGRESS_LOG_INTERVAL, SLOW_EPOCH_THRESHOLD, DEVICE, PARQUET_DATASET, SUBMISSION_DIR
+    PROGRESS_LOG_INTERVAL, SLOW_EPOCH_THRESHOLD, DEVICE, PARQUET_DATASET, SUBMISSION_DIR,
+    CLASS_WEIGHT_MIN, CLASS_WEIGHT_MAX, MIXUP_PROB, IOL_SAMPLING_FRACTION
 )
 
 # Set seed for reproducibility
@@ -354,8 +355,13 @@ total_samples = len(train_labels)
 # Stronger class weights using numpy bincount with configurable power boost
 class_counts = np.bincount(train_labels, minlength=4)
 weights = 1.0 / (class_counts + 1e-6)   # inverse frequency
-weights = weights ** CLASS_WEIGHT_POWER # configurable boost for rare classes (default: 1.5)
+weights = weights ** CLASS_WEIGHT_POWER # configurable boost for rare classes
 weights = weights / weights.sum() * 4   # normalize (sum = num_classes)
+
+# FIX-2: CLAMP WEIGHTS to prevent gradient starvation
+weights = np.clip(weights, CLASS_WEIGHT_MIN, CLASS_WEIGHT_MAX)
+weights = weights / weights.sum() * 4   # Re-normalize after clamping
+
 class_weights = torch.tensor(weights, dtype=torch.float32)
 
 print(f"\n{'='*60}")
@@ -378,8 +384,8 @@ print(f"{'='*60}")
 print("INITIALIZING DATA LOADERS")
 print(f"{'='*60}")
 
-# FIX-5: WEIGHTED SAMPLER TO ENSURE IOL EXPOSURE IN EVERY BATCH
-# Create sample weights inversely proportional to class frequency
+# FIX-3: REDUCE IOL SAMPLING PRESSURE (1 IOL every 2-3 batches instead of every batch)
+# Create sample weights inversely proportional to class frequency, but reduce IOL weight
 if isinstance(train_dataset, Subset):
     train_labels = [int(train_dataset.dataset[i][1].item()) for i in train_dataset.indices]
 else:
@@ -387,6 +393,10 @@ else:
 
 class_counts = np.bincount(train_labels, minlength=4)
 weights_per_class = 1.0 / (class_counts + 1e-6)
+
+# Reduce IOL weight (class 3) by multiplying by IOL_SAMPLING_FRACTION
+weights_per_class[3] = weights_per_class[3] * IOL_SAMPLING_FRACTION
+
 sample_weights = np.array([weights_per_class[label] for label in train_labels])
 sample_weights = sample_weights / sample_weights.sum()  # Normalize
 
@@ -395,7 +405,8 @@ sampler = WeightedRandomSampler(
     num_samples=len(sample_weights),
     replacement=True
 )
-print(f"✓ FIX-5: WeightedRandomSampler applied to balance class exposure per batch")
+print(f"✓ FIX-3: WeightedRandomSampler with reduced IOL pressure (fraction={IOL_SAMPLING_FRACTION})")
+print(f"  IOL class gets ~1 sample every {int(1/IOL_SAMPLING_FRACTION)} batches instead of every batch")
 
 # Use batch size and workers from config
 train_loader = DataLoader(
@@ -469,8 +480,10 @@ print(f"  [No Cataract, Immature, Mature, IOL] with CLASS_WEIGHT_POWER={CLASS_WE
 # Optimizer with weight decay for regularization
 optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
 
-# Focal Loss with COMPUTED weights (not config weights) and FIX-8: label smoothing
-criterion = FocalLoss(alpha=computed_class_weights, gamma=2.0, label_smoothing=LABEL_SMOOTHING, reduction='mean')
+# FIX-1: Replace Focal Loss with CrossEntropyLoss
+# Focal Loss was causing gradient starvation on majority classes (No Cataract, Mature)
+# CrossEntropyLoss with clamped class weights is sufficient for imbalance handling
+criterion = nn.CrossEntropyLoss(weight=computed_class_weights, label_smoothing=LABEL_SMOOTHING)
 
 # Learning rate scheduler (reduce LR on plateau with configurable parameters)
 from torch.optim.lr_scheduler import ReduceLROnPlateau
@@ -482,7 +495,7 @@ scheduler = ReduceLROnPlateau(
     verbose=True
 )
 print(f"✓ Optimizer: AdamW (lr={LEARNING_RATE}, weight_decay={WEIGHT_DECAY})")
-print(f"✓ Loss: Focal Loss (gamma=2.0, label_smoothing={LABEL_SMOOTHING}, class-weighted)")
+print(f"✓ Loss: CrossEntropyLoss (label_smoothing={LABEL_SMOOTHING}, class-weighted, no focal)")
 print(f"✓ Scheduler: ReduceLROnPlateau (factor={SCHEDULER_FACTOR}, patience={SCHEDULER_PATIENCE})")
 print(f"{'='*60}\n")
 
@@ -557,8 +570,9 @@ for epoch in range(num_epochs):
             print(f"  labels dtype: {labels.dtype}")
             print(f"  Model training: {model.training}\n")
         
-        # FIX-7: Apply MixUp augmentation (50% chance per batch) - BUT SKIP IF BATCH CONTAINS IOL
-        if np.random.rand() < 0.5 and not should_skip_mixup(labels):
+        # FIX-5: DISABLE MixUp entirely (MIXUP_PROB = 0.0)
+        # MixUp was contributing to gradient starvation. Re-enable at macro-F1 > 0.75
+        if MIXUP_PROB > 0 and np.random.rand() < MIXUP_PROB and not should_skip_mixup(labels):
             images_mixed, labels_a, labels_b, lam = mixup(images, labels, alpha=0.2)
             outputs_mixed = model(images_mixed)
             loss = mixup_criterion(criterion, outputs_mixed, labels_a, labels_b, lam)

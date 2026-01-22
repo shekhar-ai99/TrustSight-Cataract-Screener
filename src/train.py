@@ -385,7 +385,7 @@ print("INITIALIZING DATA LOADERS")
 print(f"{'='*60}")
 
 # FIX-3: REDUCE IOL SAMPLING PRESSURE (1 IOL every 2-3 batches instead of every batch)
-# Create sample weights inversely proportional to class frequency, but reduce IOL weight
+# Create sample weights inversely proportional to class frequency
 if isinstance(train_dataset, Subset):
     train_labels = [int(train_dataset.dataset[i][1].item()) for i in train_dataset.indices]
 else:
@@ -394,9 +394,10 @@ else:
 class_counts = np.bincount(train_labels, minlength=4)
 weights_per_class = 1.0 / (class_counts + 1e-6)
 
-# Reduce IOL weight (class 3) by multiplying by IOL_SAMPLING_FRACTION
-weights_per_class[3] = weights_per_class[3] * IOL_SAMPLING_FRACTION
+# LIGHT BOOST for Immature (class 1) to stabilize its recall on small val set
+weights_per_class[1] = weights_per_class[1] * 1.3
 
+# RESTORED: No IOL throttling (was causing F1=0.0000 for IOL class)
 sample_weights = np.array([weights_per_class[label] for label in train_labels])
 sample_weights = sample_weights / sample_weights.sum()  # Normalize
 
@@ -405,8 +406,8 @@ sampler = WeightedRandomSampler(
     num_samples=len(sample_weights),
     replacement=True
 )
-print(f"✓ FIX-3: WeightedRandomSampler with reduced IOL pressure (fraction={IOL_SAMPLING_FRACTION})")
-print(f"  IOL class gets ~1 sample every {int(1/IOL_SAMPLING_FRACTION)} batches instead of every batch")
+print(f"✓ WeightedRandomSampler: Natural inverse-frequency balancing (IOL_SAMPLING_FRACTION restored to 1.0)")
+print(f"  All classes equally represented per epoch")
 
 # Use batch size and workers from config
 train_loader = DataLoader(
@@ -492,7 +493,8 @@ scheduler = ReduceLROnPlateau(
     mode='min',
     factor=SCHEDULER_FACTOR,
     patience=SCHEDULER_PATIENCE,
-    verbose=True
+    verbose=True,
+    min_lr=1e-5  # Prevent LR from decaying into underfitting (stuck at 1e-6 before)
 )
 print(f"✓ Optimizer: AdamW (lr={LEARNING_RATE}, weight_decay={WEIGHT_DECAY})")
 print(f"✓ Loss: CrossEntropyLoss (label_smoothing={LABEL_SMOOTHING}, class-weighted, no focal)")

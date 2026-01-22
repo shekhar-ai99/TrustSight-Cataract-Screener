@@ -1,0 +1,14 @@
+Training Run Summary
+============================================================
+Run Timestamp: 2026-01-22_23-59-06
+Best Validation F1: 0.4934
+Total Epochs: 30
+Train Resolution: 384
+Batch Size: 4
+Gradient Accumulation Steps: 4
+Effective Batch Size: 16
+Label Smoothing: 0.05
+Freeze Backbone Until Epoch: 2
+Best Model Path: C:\Projects\Learning\TrustSight-Cataract-Screener\src\..\best_model\model.pth
+Submission Package: C:\Projects\Learning\TrustSight-Cataract-Screener\test_submission\model_2026-01-23_00-44-23_BEST_F1_0.4934\model.tar.gz
+============================================================

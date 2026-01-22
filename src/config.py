@@ -11,11 +11,11 @@ DEBUG_SUBSAMPLE = False      # Alternative debug mode
 DEBUG_SAMPLE_SIZE = 50       # Only used if DEBUG_SUBSAMPLE=True
 
 # ============ TRAINING HYPERPARAMETERS ============
-NUM_EPOCHS = 20              # Reduced for faster training (was 20)
-BATCH_SIZE = 2               # Batch size (keep small for CPU)
+NUM_EPOCHS = 30              # Extended training for small dataset (160 samples)
+BATCH_SIZE = 4               # Increased for stable gradients (was 2, now 4 for CPU)
 NUM_WORKERS = 0              # DataLoader workers (0=safe for Windows, 1-2=faster on Linux)
-LEARNING_RATE = 1e-4         # Initial learning rate for AdamW
-WEIGHT_DECAY = 1e-4          # L2 regularization (prevents overfitting)
+LEARNING_RATE = 5e-5         # Gentler learning rate for longer convergence
+WEIGHT_DECAY = 1e-4          # Slightly stronger regularization to improve generalization
 
 # ============ CLASS IMBALANCE HANDLING ============
 # Class weights for CrossEntropyLoss [No, Immature, Mature, IOL]
@@ -23,7 +23,7 @@ WEIGHT_DECAY = 1e-4          # L2 regularization (prevents overfitting)
 CLASS_WEIGHTS = [1.0, 2.0, 1.2, 1.0]  # Boost Immature Cataract recall
 
 # ============ EARLY STOPPING ============
-EARLY_STOPPING_PATIENCE = 5  # Stop if val_f1 doesn't improve for N epochs (informational only)
+EARLY_STOPPING_PATIENCE = 10 # Extended patience (30 epochs total, stop at plateau)
 SAVE_BEST_MODEL = True       # Save best model checkpoint during training
 
 # ============ SCHEDULER ============
@@ -31,9 +31,9 @@ SCHEDULER_FACTOR = 0.5       # Multiply LR by this when plateau detected
 SCHEDULER_PATIENCE = 3       # Epochs without improvement before reducing LR
 
 # ============ RESOLUTION ============
-TRAIN_RESOLUTION = 512       # FIX-3: Train at 512 to match inference resolution
-VAL_RESOLUTION = 512         # Match training resolution
-INFERENCE_RESOLUTION = 512   # Inference stays 512×512 (consistent with training)
+TRAIN_RESOLUTION = 384       # Reduced from 512 (better for CPU, small dataset, EfficientNet-B0 pretraining)
+VAL_RESOLUTION = 384         # Match training resolution
+INFERENCE_RESOLUTION = 384   # Inference 384×384 (matches training, faster on CPU)
 
 # ============ AUGMENTATION PARAMETERS ============
 AUGMENTATION_BRIGHTNESS = 0.4      # RandomBrightnessContrast range
@@ -60,8 +60,8 @@ IMMATURE_GAUSSIAN_BLUR_KERNEL = 3       # Gaussian blur kernel for Immature
 IMMATURE_GAUSSIAN_BLUR_SIGMA = (0.1, 1.0)  # Gaussian blur sigma for Immature
 
 # ============ BACKBONE FREEZING ============
-FREEZE_BACKBONE_UNTIL_EPOCH = 5   # Unfreeze backbone at epoch 5 (not later - head collapses by epoch 10)
-UNFREEZE_LR = 5e-6           # When unfreezing, use 20x reduction from initial LR
+FREEZE_BACKBONE_UNTIL_EPOCH = 2   # Unfreeze at epoch 2 (160 samples need aggressive tuning)
+UNFREEZE_LR = 1e-5           # Very gentle fine-tuning when unfreezing
 
 # ============ LABEL SMOOTHING ============
 LABEL_SMOOTHING = 0.05       # Mild label smoothing with CrossEntropyLoss (reduced from Focal config)
@@ -78,7 +78,7 @@ CLASS_WEIGHT_MAX = 1.5       # CLAMP: Maximum class weight to prevent rare-class
 MIXUP_PROB = 0.0             # DISABLED - Causes gradient starvation with Focal. Re-enable at macro-F1 > 0.75
 
 # ============ IOL SAMPLING ============
-IOL_SAMPLING_FRACTION = 0.33 # Include IOL 1 every ~3 batches instead of every batch (reduce pressure)
+IOL_SAMPLING_FRACTION = 1.0  # RESTORED - No throttling. Batch_size=2 + 33% = IOL starvation. Use natural weight balance
 
 # ============ LOGGING ============
 PROGRESS_LOG_INTERVAL = 5    # How often to print batch progress (in batches)
